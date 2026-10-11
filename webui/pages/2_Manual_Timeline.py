@@ -226,13 +226,18 @@ def _local_ai_best_moment(sources, prompt, wanted_duration, work_folder, clip_bu
         if not frames:
             raise RuntimeError(f"No frames could be sampled from {source.name}")
         text_tokens = tokenizer([prompt]).to(device)
-        image_tensor = torch.stack(frames).to(device)
+        text_features = model.encode_text(text_tokens)
+        text_features /= text_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        similarities = []
         with torch.inference_mode():
-            image_features = model.encode_image(image_tensor)
-            text_features = model.encode_text(text_tokens)
-            image_features /= image_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            text_features /= text_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            similarities = (image_features @ text_features.T).squeeze(1).float().cpu().tolist()
+            # Small batches keep VRAM usage reasonable on entry-level GPUs.
+            for batch_start in range(0, len(frames), 16):
+                image_tensor = torch.stack(frames[batch_start:batch_start + 16]).to(device)
+                image_features = model.encode_image(image_tensor)
+                image_features /= image_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+                similarities.extend(
+                    (image_features @ text_features.T).squeeze(1).float().cpu().tolist()
+                )
 
         low, high = min(similarities), max(similarities)
         spread = max(high - low, 1e-6)
@@ -417,6 +422,11 @@ def main():
             "source_start": 0.0, "ai_source_starts": [],
             "narration": "", "voice": "ml-IN-MidhunNeural",
         }]
+
+    for row in st.session_state.manual_scene_rows:
+        row.setdefault("visual_prompt", "A clear, sharp wildlife video showing the target animal naturally")
+        row.pop("ai_results", None)
+        row.pop("ai_source_starts", None)
 
     edited = st.data_editor(
         st.session_state.manual_scene_rows,
