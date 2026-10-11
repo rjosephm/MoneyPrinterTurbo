@@ -172,7 +172,7 @@ def _load_local_clip():
 
 def _local_ai_best_moment(sources, prompt, wanted_duration, work_folder, clip_bundle):
     """Rank candidate windows with local CLIP similarity and simple visual-quality checks."""
-    from PIL import Image, ImageStat
+    from PIL import Image, ImageFilter, ImageStat
 
     torch, model, preprocess, tokenizer, device = clip_bundle
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
@@ -215,9 +215,12 @@ def _local_ai_best_moment(sources, prompt, wanted_duration, work_folder, clip_bu
                 continue
             with Image.open(frame_path) as image:
                 rgb = image.convert("RGB")
-                gray_stats = ImageStat.Stat(rgb.convert("L"))
+                gray = rgb.convert("L")
+                gray_stats = ImageStat.Stat(gray)
                 brightness = gray_stats.mean[0] / 255.0
-                detail = min(1.0, gray_stats.stddev[0] / 64.0)
+                # Edge energy is a lightweight blur/detail proxy; it is not semantic understanding.
+                edge_energy = ImageStat.Stat(gray.filter(ImageFilter.FIND_EDGES)).stddev[0]
+                detail = min(1.0, edge_energy / 48.0)
                 exposure = max(0.0, 1.0 - abs(brightness - 0.5) / 0.5)
                 quality = 0.65 * detail + 0.35 * exposure
                 frames.append(preprocess(rgb))
