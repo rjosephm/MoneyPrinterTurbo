@@ -36,7 +36,7 @@ def _output_size(settings):
     height = heights.get(resolution, 1080)
     width = widths.get(resolution, 1920)
     if aspect == "9:16":
-        return height * 9 // 16, height
+        return height, width
     if aspect == "1:1":
         return height, height
     return width, height
@@ -118,9 +118,9 @@ def _resolve_sources(scene, folder, sid):
     if not keywords:
         raise ValueError(f"{sid}: provide video URLs, a local path, or fallback keywords.")
 
-    key = os.environ.get("PEXELS_API_KEY", "").strip()
+    key = _configured_pexels_key()
     if not key:
-        raise ValueError("Set PEXELS_API_KEY to enable keyword search.")
+        raise ValueError("No Pexels API key found in MoneyPrinterTurbo config or PEXELS_API_KEY environment variable.")
     import requests
     response = requests.get(
         "https://api.pexels.com/videos/search",
@@ -174,6 +174,10 @@ def render(project, folder):
     fps = int(settings.get("fps", 30))
     narration_rate = int(settings.get("narration_speed", 0))
     tts_rate = f"{narration_rate:+d}%"
+    if settings.get("crop_mode", "Fill and crop") == "Fit with bars":
+        video_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps},setsar=1"
+    else:
+        video_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={fps},setsar=1"
     folder.mkdir(parents=True, exist_ok=True)
     scene_parts = []
     for scene_index, scene in enumerate(scenes, 1):
@@ -194,7 +198,7 @@ def render(project, folder):
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                 "-stream_loop", "-1", "-ss", str(source_start), "-i", str(source),
                 "-map", "0:v:0", "-an",
-                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={fps},setsar=1",
+                "-vf", video_filter,
                 "-t", f"{per_clip:.6f}", "-c:v", "libx264", "-preset", "veryfast",
                 "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
                 str(clip_path),
@@ -220,7 +224,7 @@ def render(project, folder):
                 import edge_tts
             except ImportError as exc:
                 raise RuntimeError("Install edge-tts to generate narration: pip install edge-tts") from exc
-            voice = str(scene.get("voice") or "ml-IN-MidhunNeural").strip()
+            voice = str(scene.get("voice") or settings.get("voice") or "ml-IN-MidhunNeural").strip()
             asyncio.run(edge_tts.Communicate(narration, voice, rate=tts_rate).save(str(audio_path)))
             audio_input = str(audio_path)
         else:
