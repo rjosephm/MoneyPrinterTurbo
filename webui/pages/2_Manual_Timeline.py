@@ -10,8 +10,36 @@ from urllib.parse import urlparse
 
 import streamlit as st
 
+from app.config import config
+
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
+
+
+def _configured_pexels_key():
+    """Reuse the API keys already configured in MoneyPrinterTurbo."""
+    configured = config.app.get("pexels_api_keys", [])
+    if isinstance(configured, str):
+        configured = [item.strip() for item in configured.split(",") if item.strip()]
+    if isinstance(configured, (list, tuple)):
+        for item in configured:
+            if str(item).strip():
+                return str(item).strip()
+    return os.environ.get("PEXELS_API_KEY", "").strip()
+
+
+def _output_size(settings):
+    resolution = settings.get("resolution", "1080p")
+    aspect = settings.get("aspect_ratio", "16:9")
+    widths = {"480p": 854, "720p": 1280, "1080p": 1920, "1440p": 2560, "2160p (4K)": 3840}
+    heights = {"480p": 480, "720p": 720, "1080p": 1080, "1440p": 1440, "2160p (4K)": 2160}
+    height = heights.get(resolution, 1080)
+    width = widths.get(resolution, 1920)
+    if aspect == "9:16":
+        return height * 9 // 16, height
+    if aspect == "1:1":
+        return height, height
+    return width, height
 
 
 def _split_urls(value):
@@ -36,7 +64,7 @@ def _download_video_url(url, target, sid):
         match = re.search(r"-(\d+)/?$", parsed.path)
         if not match:
             raise ValueError(f"{sid}: could not identify the Pexels video ID in {url}")
-        key = os.environ.get("PEXELS_API_KEY", "").strip()
+        key = _configured_pexels_key()
         if not key:
             raise ValueError("Set PEXELS_API_KEY to resolve Pexels page links.")
         response = requests.get(
@@ -141,6 +169,11 @@ def render(project, folder):
             raise ValueError("Each scene end must be after its start.")
         cursor = end
 
+    settings = project.get("settings", {})
+    width, height = _output_size(settings)
+    fps = int(settings.get("fps", 30))
+    narration_rate = int(settings.get("narration_speed", 0))
+    tts_rate = f"{narration_rate:+d}%"
     folder.mkdir(parents=True, exist_ok=True)
     scene_parts = []
     for scene_index, scene in enumerate(scenes, 1):
@@ -161,7 +194,7 @@ def render(project, folder):
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                 "-stream_loop", "-1", "-ss", str(source_start), "-i", str(source),
                 "-map", "0:v:0", "-an",
-                "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,setsar=1",
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={fps},setsar=1",
                 "-t", f"{per_clip:.6f}", "-c:v", "libx264", "-preset", "veryfast",
                 "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
                 str(clip_path),
@@ -188,7 +221,7 @@ def render(project, folder):
             except ImportError as exc:
                 raise RuntimeError("Install edge-tts to generate narration: pip install edge-tts") from exc
             voice = str(scene.get("voice") or "ml-IN-MidhunNeural").strip()
-            asyncio.run(edge_tts.Communicate(narration, voice).save(str(audio_path)))
+            asyncio.run(edge_tts.Communicate(narration, voice, rate=tts_rate).save(str(audio_path)))
             audio_input = str(audio_path)
         else:
             audio_input = "anullsrc=r=48000:cl=stereo"
@@ -236,6 +269,28 @@ def main():
     with st.sidebar:
         project_id = st.text_input("Project name", "my_video")
 
+    st.subheader("Video Settings")
+    with st.expander("Resolution, aspect ratio, frame rate and narration", expanded=True):
+        setting1, setting2, setting3 = st.columns(3)
+        with setting1:
+            resolution = st.selectbox("Output resolution", ["480p", "720p", "1080p", "1440p", "2160p (4K)"], index=2)
+            aspect_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16", "1:1"], index=0)
+        with setting2:
+            fps = st.selectbox("Frame rate (FPS)", [24, 25, 30, 50, 60], index=2)
+            narration_speed = st.slider("Narration speed (%)", min_value=-50, max_value=100, value=0, step=5, help="0% is normal speed; negative is slower and positive is faster.")
+        with setting3:
+            tts_voice = st.text_input("TTS voice", "ml-IN-MidhunNeural", help="Use an Edge TTS voice ID, for example ml-IN-MidhunNeural.")
+            crop_mode = st.selectbox("Video fitting", ["Fill and crop", "Fit with bars"], index=0)
+
+    settings = {
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "fps": int(fps),
+        "narration_speed": int(narration_speed),
+        "voice": tts_voice.strip() or "ml-IN-MidhunNeural",
+        "crop_mode": crop_mode,
+    }
+
     if "manual_scene_rows" not in st.session_state:
         st.session_state.manual_scene_rows = [{
             "id": "scene_1", "start": 0.0, "end": 8.0, "urls": "",
@@ -277,10 +332,14 @@ def main():
                 placeholder="https://example.com/clip1.mp4\nhttps://example.com/clip2.mp4",
             )
 
-    st.caption("Direct HTTPS video links and local files do not need an API key. Pexels page links/search do.")
-    st.code("set PEXELS_API_KEY=your_key_here", language="bat")
+    pexels_ready = bool(_configured_pexels_key())
+    if pexels_ready:
+        st.success("Pexels API key found in MoneyPrinterTurbo config (or environment).")
+    else:
+        st.warning("No Pexels key found. Add one in the main MoneyPrinterTurbo settings/config, or use direct HTTPS video URLs/local files.")
+    st.caption("The editor reuses app.pexels_api_keys from MoneyPrinterTurbo's config; it does not require you to paste the key into this page.")
     project_id = re.sub(r"[^A-Za-z0-9_-]", "_", project_id) or "my_video"
-    project = {"project_id": project_id, "scenes": st.session_state.manual_scene_rows}
+    project = {"project_id": project_id, "settings": settings, "scenes": st.session_state.manual_scene_rows}
 
     left, right = st.columns(2)
     with left:
