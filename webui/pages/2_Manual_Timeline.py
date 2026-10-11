@@ -438,6 +438,13 @@ def main():
         },
     )
     st.session_state.manual_scene_rows = edited.to_dict("records") if hasattr(edited, "to_dict") else list(edited)
+    for row in st.session_state.manual_scene_rows:
+        row.setdefault("visual_prompt", "A clear, sharp wildlife video showing the target animal naturally")
+
+    if "manual_ai_results" not in st.session_state:
+        st.session_state.manual_ai_results = {}
+    if "manual_ai_starts" not in st.session_state:
+        st.session_state.manual_ai_starts = {}
 
     st.subheader("Video URLs per scene")
     st.caption("Paste one HTTPS direct video URL or Pexels video-page URL per line. Pexels page links and keyword search require PEXELS_API_KEY.")
@@ -486,8 +493,8 @@ def main():
                 results = _local_ai_best_moment(
                     sources, prompt, per_clip, scene_folder, clip_bundle
                 )
-                row["ai_source_starts"] = [item["start"] for item in results]
-                row["ai_results"] = results
+                st.session_state.manual_ai_starts[sid] = [item["start"] for item in results]
+                st.session_state.manual_ai_results[sid] = results
                 progress.progress(scene_index / max(1, len(rows)), text=f"Analyzed {sid}")
             st.session_state.manual_scene_rows = rows
             st.success("Analysis complete. Review each scene's selected moment below, then render.")
@@ -495,7 +502,8 @@ def main():
             st.error(f"AI analysis failed: {exc}")
 
     for index, row in enumerate(st.session_state.manual_scene_rows):
-        results = row.get("ai_results") or []
+        sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(row.get("id") or f"scene_{index + 1}"))
+        results = st.session_state.manual_ai_results.get(sid, [])
         if results:
             with st.expander(f"AI preview — {row.get('id', f'scene_{index + 1}')}", expanded=True):
                 for clip_index, item in enumerate(results, 1):
@@ -506,13 +514,18 @@ def main():
                     if Path(item["preview"]).is_file():
                         st.image(item["preview"], caption=f"Selected frame from clip {clip_index}", width=360)
                 if st.button("Clear AI selection for this scene", key=f"clear_ai_{index}"):
-                    row["ai_source_starts"] = []
-                    row["ai_results"] = []
-                    st.session_state.manual_scene_rows = st.session_state.manual_scene_rows
+                    st.session_state.manual_ai_starts.pop(sid, None)
+                    st.session_state.manual_ai_results.pop(sid, None)
                     st.rerun()
 
     project_id = re.sub(r"[^A-Za-z0-9_-]", "_", project_id) or "my_video"
-    project = {"project_id": project_id, "settings": settings, "scenes": st.session_state.manual_scene_rows}
+    project_scenes = []
+    for index, row in enumerate(st.session_state.manual_scene_rows, 1):
+        scene = dict(row)
+        sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(scene.get("id") or f"scene_{index}"))
+        scene["ai_source_starts"] = st.session_state.manual_ai_starts.get(sid, [])
+        project_scenes.append(scene)
+    project = {"project_id": project_id, "settings": settings, "scenes": project_scenes}
 
     left, right = st.columns(2)
     with left:
