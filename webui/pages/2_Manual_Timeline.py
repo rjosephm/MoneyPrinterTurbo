@@ -150,6 +150,118 @@ def _run(cmd, timeout=1800):
     return result
 
 
+
+def _load_local_clip():
+    """Load a free, local OpenCLIP model. First run downloads weights once."""
+    try:
+        import torch
+        import open_clip
+    except ImportError as exc:
+        raise RuntimeError(
+            "Local AI packages are missing. In the MoneyPrinterTurbo environment run: "
+            "python -m pip install open_clip_torch"
+        ) from exc
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32", pretrained="laion2b_s34b_b79k"
+    )
+    model = model.to(device).eval()
+    tokenizer = open_clip.get_tokenizer("ViT-B-32")
+    return torch, model, preprocess, tokenizer, device
+
+
+def _local_ai_best_moment(sources, prompt, wanted_duration, work_folder, clip_bundle):
+    """Rank candidate windows with local CLIP similarity and simple visual-quality checks."""
+    from PIL import Image, ImageStat
+
+    torch, model, preprocess, tokenizer, device = clip_bundle
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        raise RuntimeError("FFmpeg and FFprobe must be installed and available on PATH.")
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise ValueError("Add an AI visual prompt for this scene before analyzing it.")
+
+    results = []
+    for source_index, source in enumerate(sources, 1):
+        probe = _run([
+            ffprobe, "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(source),
+        ])
+        try:
+            source_duration = max(0.0, float(probe.stdout.strip()))
+        except (ValueError, TypeError):
+            source_duration = 0.0
+        if source_duration <= 0:
+            raise RuntimeError(f"Could not read duration for {source.name}")
+        max_start = max(0.0, source_duration - min(wanted_duration, source_duration))
+        step = 1.0
+        sample_times = []
+        t = 0.0
+        while t <= source_duration + 0.001:
+            sample_times.append(min(t, max(0.0, source_duration - 0.05)))
+            t += step
+        frame_dir = work_folder / f"ai_frames_{source_index:02d}"
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        frames, qualities, timestamps = [], [], []
+        for frame_index, timestamp in enumerate(sample_times):
+            frame_path = frame_dir / f"frame_{frame_index:05d}.jpg"
+            _run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-ss", f"{timestamp:.3f}", "-i", str(source),
+                "-frames:v", "1", "-vf", "scale=320:-2", str(frame_path),
+            ], timeout=120)
+            if not frame_path.exists() or frame_path.stat().st_size == 0:
+                continue
+            with Image.open(frame_path) as image:
+                rgb = image.convert("RGB")
+                gray_stats = ImageStat.Stat(rgb.convert("L"))
+                brightness = gray_stats.mean[0] / 255.0
+                detail = min(1.0, gray_stats.stddev[0] / 64.0)
+                exposure = max(0.0, 1.0 - abs(brightness - 0.5) / 0.5)
+                quality = 0.65 * detail + 0.35 * exposure
+                frames.append(preprocess(rgb))
+                qualities.append(quality)
+                timestamps.append(timestamp)
+        if not frames:
+            raise RuntimeError(f"No frames could be sampled from {source.name}")
+        text_tokens = tokenizer([prompt]).to(device)
+        image_tensor = torch.stack(frames).to(device)
+        with torch.inference_mode():
+            image_features = model.encode_image(image_tensor)
+            text_features = model.encode_text(text_tokens)
+            image_features /= image_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            text_features /= text_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+            similarities = (image_features @ text_features.T).squeeze(1).float().cpu().tolist()
+
+        low, high = min(similarities), max(similarities)
+        spread = max(high - low, 1e-6)
+        relevance = [(score - low) / spread for score in similarities]
+        frame_scores = [0.8 * relevance[i] + 0.2 * qualities[i] for i in range(len(frames))]
+        window_end = min(source_duration, wanted_duration)
+        candidates = [0.0]
+        candidate = step
+        while candidate <= max_start + 0.001:
+            candidates.append(candidate)
+            candidate += step
+        best = None
+        for start in candidates:
+            indices = [i for i, ts in enumerate(timestamps) if start <= ts < start + window_end]
+            if not indices:
+                indices = [min(range(len(timestamps)), key=lambda i: abs(timestamps[i] - start))]
+            score = sum(frame_scores[i] for i in indices) / len(indices)
+            if best is None or score > best["score"]:
+                best = {"start": start, "score": score, "indices": indices}
+        best_frame_index = max(best["indices"], key=lambda i: frame_scores[i])
+        results.append({
+            "start": round(float(best["start"]), 3),
+            "score": round(float(best["score"]), 4),
+            "preview": str(frame_dir / f"frame_{timestamps.index(timestamps[best_frame_index]):05d}.jpg"),
+            "source": str(source),
+            "duration": round(source_duration, 3),
+        })
+    return results
+
 def render(project, folder):
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
@@ -188,11 +300,13 @@ def render(project, folder):
         start, end = float(scene["start"]), float(scene["end"])
         duration = end - start
         per_clip = duration / len(sources)
-        source_start = max(0.0, float(scene.get("source_start") or 0.0))
+        default_source_start = max(0.0, float(scene.get("source_start") or 0.0))
+        ai_starts = scene.get("ai_source_starts") or []
         silent_clips = []
 
-        # Each supplied source gets an equal share of the scene; short sources loop to fill it.
+        # Each supplied source gets an equal share; AI-selected in-points override the default.
         for clip_index, source in enumerate(sources, 1):
+            source_start = max(0.0, float(ai_starts[clip_index - 1])) if clip_index <= len(ai_starts) else default_source_start
             clip_path = scene_folder / f"clip_{clip_index:02d}.mp4"
             _run([
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -299,7 +413,8 @@ def main():
     if "manual_scene_rows" not in st.session_state:
         st.session_state.manual_scene_rows = [{
             "id": "scene_1", "start": 0.0, "end": 8.0, "urls": "",
-            "local_path": "", "keywords": "", "source_start": 0.0,
+            "local_path": "", "keywords": "", "visual_prompt": "A clear, sharp wildlife video showing the target animal naturally",
+            "source_start": 0.0, "ai_source_starts": [],
             "narration": "", "voice": "ml-IN-MidhunNeural",
         }]
 
@@ -308,7 +423,7 @@ def main():
         num_rows="dynamic",
         hide_index=True,
         use_container_width=True,
-        column_order=["id", "start", "end", "local_path", "keywords", "source_start", "narration", "voice"],
+        column_order=["id", "start", "end", "local_path", "keywords", "visual_prompt", "source_start", "narration", "voice"],
         column_config={
             "id": st.column_config.TextColumn("Scene ID", required=True),
             "start": st.column_config.NumberColumn("Timeline start (s)", min_value=0.0, step=1.0),
@@ -316,7 +431,8 @@ def main():
             "urls": None,
             "local_path": st.column_config.TextColumn("Local video file path", width="large"),
             "keywords": st.column_config.TextColumn("Fallback keywords", width="medium"),
-            "source_start": st.column_config.NumberColumn("Source in-point (s)", min_value=0.0, step=1.0),
+            "visual_prompt": st.column_config.TextColumn("AI visual prompt", width="large", help="Describe exactly what the footage should show; this is matched locally against sampled frames."),
+            "source_start": st.column_config.NumberColumn("Default source in-point (s)", min_value=0.0, step=1.0),
             "narration": st.column_config.TextColumn("Editable narration (Malayalam supported)", width="large"),
             "voice": st.column_config.TextColumn("TTS voice"),
         },
@@ -343,6 +459,58 @@ def main():
     else:
         st.warning("No Pexels key found. Add one in the main MoneyPrinterTurbo settings/config, or use direct HTTPS video URLs/local files.")
     st.caption("The editor reuses app.pexels_api_keys from MoneyPrinterTurbo's config; it does not require you to paste the key into this page.")
+    st.subheader("Free local AI — best-moment analysis")
+    st.caption(
+        "Uses OpenCLIP on this Windows computer (no paid AI API). On first use, "
+        "open_clip_torch and its model weights must be installed/downloaded. "
+        "It samples frames, matches them to each scene prompt, and downranks very dark/low-detail frames."
+    )
+    st.warning(
+        "AI scores visual similarity and basic image quality; it does not understand every action or guarantee "
+        "that a shot is narratively perfect. Review the selected previews before rendering."
+    )
+    if st.button("Analyze best moments (free local AI)", use_container_width=True):
+        try:
+            clip_bundle = _load_local_clip()
+            progress = st.progress(0.0, text="Loading local AI model…")
+            rows = st.session_state.manual_scene_rows
+            for scene_index, row in enumerate(rows, 1):
+                sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(row.get("id") or f"scene_{scene_index}"))
+                scene_folder = OUT / project_id / f"scene_{scene_index:03d}_{sid}"
+                sources = _resolve_sources(row, scene_folder, sid)
+                scene_duration = float(row["end"]) - float(row["start"])
+                per_clip = scene_duration / max(1, len(sources))
+                prompt = str(row.get("visual_prompt") or "").strip()
+                if not prompt:
+                    prompt = str(row.get("keywords") or row.get("narration") or "").strip()
+                results = _local_ai_best_moment(
+                    sources, prompt, per_clip, scene_folder, clip_bundle
+                )
+                row["ai_source_starts"] = [item["start"] for item in results]
+                row["ai_results"] = results
+                progress.progress(scene_index / max(1, len(rows)), text=f"Analyzed {sid}")
+            st.session_state.manual_scene_rows = rows
+            st.success("Analysis complete. Review each scene's selected moment below, then render.")
+        except Exception as exc:
+            st.error(f"AI analysis failed: {exc}")
+
+    for index, row in enumerate(st.session_state.manual_scene_rows):
+        results = row.get("ai_results") or []
+        if results:
+            with st.expander(f"AI preview — {row.get('id', f'scene_{index + 1}')}", expanded=True):
+                for clip_index, item in enumerate(results, 1):
+                    st.markdown(
+                        f"**Clip {clip_index}:** start at {item['start']:.1f}s · "
+                        f"match/quality score {item['score']:.3f} · source duration {item['duration']:.1f}s"
+                    )
+                    if Path(item["preview"]).is_file():
+                        st.image(item["preview"], caption=f"Selected frame from clip {clip_index}", width=360)
+                if st.button("Clear AI selection for this scene", key=f"clear_ai_{index}"):
+                    row["ai_source_starts"] = []
+                    row["ai_results"] = []
+                    st.session_state.manual_scene_rows = st.session_state.manual_scene_rows
+                    st.rerun()
+
     project_id = re.sub(r"[^A-Za-z0-9_-]", "_", project_id) or "my_video"
     project = {"project_id": project_id, "settings": settings, "scenes": st.session_state.manual_scene_rows}
 
