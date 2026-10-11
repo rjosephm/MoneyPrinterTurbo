@@ -12,6 +12,77 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
 
 
+
+
+def _get_footage(scene, folder, sid):
+    """Resolve explicit Pexels/direct MP4 URLs, local files, then keyword search."""
+    import requests
+    from urllib.parse import urlparse
+    url = str(scene.get("url") or "").strip()
+    local = str(scene.get("local_path") or "").strip()
+    keywords = str(scene.get("keywords") or "").strip()
+    key = os.environ.get("PEXELS_API_KEY", "").strip()
+
+    if url:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        direct = url
+        if parsed.scheme != "https":
+            raise ValueError(f"{sid}: only HTTPS video URLs are supported.")
+        if host.endswith("pexels.com") and "/video/" in parsed.path:
+            match = re.search(r"-(\d+)/?$", parsed.path)
+            if not match:
+                raise ValueError(f"{sid}: could not identify the Pexels video ID.")
+            if not key:
+                raise ValueError("Set PEXELS_API_KEY to resolve Pexels page links.")
+            response = requests.get("https://api.pexels.com/videos/videos/" + match.group(1),
+                                    headers={"Authorization": key}, timeout=30)
+            response.raise_for_status()
+            files = [v for v in response.json().get("video_files", [])
+                     if v.get("link") and v.get("file_type") == "video/mp4"]
+            if not files:
+                raise ValueError(f"{sid}: Pexels returned no MP4.")
+            files.sort(key=lambda v: abs(int(v.get("width") or 0) - 1920))
+            direct = files[0]["link"]
+        elif not parsed.path.lower().endswith((".mp4", ".m4v", ".mov", ".webm")):
+            raise ValueError(f"{sid}: use a Pexels video page or a direct video-file URL.")
+        target = folder / "media" / (sid + ".mp4")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with requests.get(direct, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            with target.open("wb") as output:
+                for chunk in response.iter_content(1024 * 1024):
+                    if chunk:
+                        output.write(chunk)
+        if not target.exists() or target.stat().st_size == 0:
+            raise ValueError(f"{sid}: video download was empty.")
+        return target
+
+    if local:
+        source = Path(local).expanduser().resolve()
+        if not source.is_file():
+            raise ValueError(f"{sid}: local video file does not exist: {local}")
+        return source
+
+    if not keywords:
+        raise ValueError(f"{sid}: provide a video URL, local path, or fallback keywords.")
+    if not key:
+        raise ValueError("Set PEXELS_API_KEY to enable keyword search.")
+    response = requests.get("https://api.pexels.com/videos/search",
+        params={"query": keywords, "per_page": 10, "orientation": "landscape"},
+        headers={"Authorization": key}, timeout=30)
+    response.raise_for_status()
+    videos = response.json().get("videos", [])
+    if not videos:
+        raise ValueError(f"{sid}: no Pexels results for keyword: {keywords}")
+    files = [v for v in videos[0].get("video_files", [])
+             if v.get("link") and v.get("file_type") == "video/mp4"]
+    if not files:
+        raise ValueError(f"{sid}: Pexels result had no MP4.")
+    files.sort(key=lambda v: abs(int(v.get("width") or 0) - 1920))
+    return _get_footage({"url": files[0]["link"]}, folder, sid)
+
+
 def render(project, folder):
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
@@ -33,9 +104,7 @@ def render(project, folder):
     parts = []
     for index, scene in enumerate(scenes, 1):
         sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(scene.get("id") or f"scene_{index}"))
-        source = Path(str(scene.get("local_path") or "")).expanduser()
-        if not str(scene.get("local_path") or "").strip() or not source.is_file():
-            raise ValueError(f"Scene {sid}: enter an existing local video path. URL downloads are added in the next stage.")
+        source = _get_footage(scene, folder, sid)
         start, end = float(scene["start"]), float(scene["end"])
         duration = end - start
         part = folder / f"{index:03d}_{sid}.mp4"
@@ -73,22 +142,26 @@ def main():
     st.set_page_config(page_title="Manual Timeline Editor", page_icon="🎬", layout="wide")
     st.title("🎬 Manual Timeline Editor")
     st.caption("Separate from the existing automatic generation mode. Set exact scene times and bind narration to each scene.")
-    st.info("Current first stage supports local video paths. URL resolution/download and keyword fallback are the next implementation stage; this page will never substitute a different clip silently.")
+    st.info("Source priority: explicit URL → local file path → keyword search. If an explicit URL fails, rendering stops instead of silently replacing it with another clip.")
     with st.sidebar:
         project_id = st.text_input("Project name", "my_video")
     if "manual_scene_rows" not in st.session_state:
-        st.session_state.manual_scene_rows = [{"id":"scene_1","start":0.0,"end":8.0,"local_path":"","source_start":0.0,"narration":"","voice":"ml-IN-MidhunNeural"}]
+        st.session_state.manual_scene_rows = [{"id":"scene_1","start":0.0,"end":8.0,"url":"","local_path":"","keywords":"","source_start":0.0,"narration":"","voice":"ml-IN-MidhunNeural"}]
     rows = st.data_editor(st.session_state.manual_scene_rows, num_rows="dynamic", hide_index=True, use_container_width=True,
         column_config={
             "id":st.column_config.TextColumn("Scene ID", required=True),
             "start":st.column_config.NumberColumn("Timeline start (s)", min_value=0.0, step=1.0),
             "end":st.column_config.NumberColumn("Timeline end (s)", min_value=0.1, step=1.0),
+            "url":st.column_config.TextColumn("Video URL (Pexels page/direct MP4)", width="large"),
             "local_path":st.column_config.TextColumn("Local video file path", width="large"),
+            "keywords":st.column_config.TextColumn("Fallback keywords", width="medium"),
             "source_start":st.column_config.NumberColumn("Source in-point (s)", min_value=0.0, step=1.0),
             "narration":st.column_config.TextColumn("Narration (Malayalam supported)", width="large"),
             "voice":st.column_config.TextColumn("TTS voice"),
         })
     st.session_state.manual_scene_rows = rows.to_dict("records") if hasattr(rows, "to_dict") else list(rows)
+    st.caption("Pexels page links and keyword search require PEXELS_API_KEY. Direct HTTPS MP4 links and local files do not need the key.")
+    st.code("set PEXELS_API_KEY=your_key_here", language="bat")
     project_id = re.sub(r"[^A-Za-z0-9_-]", "_", project_id) or "my_video"
     project = {"project_id":project_id, "scenes":st.session_state.manual_scene_rows}
     a, b = st.columns(2)
