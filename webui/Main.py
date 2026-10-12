@@ -7338,6 +7338,7 @@ def _render_audio_settings(panel, params):
                 )
                 if selected_profile_id != "__upload__":
                     try:
+                        previous_reference_digest = _get_voxcpm_reference_audio_digest()
                         reference_audio = voice_profiles.load_profile_audio(selected_profile_id)
                         reference_digest = hashlib.sha256(reference_audio).hexdigest()
                         st.session_state[VOXCPM_REFERENCE_AUDIO_SESSION_KEY] = {
@@ -7345,6 +7346,11 @@ def _render_audio_settings(panel, params):
                             "audio_digest": reference_digest,
                             "audio_bytes": reference_audio,
                         }
+                        if (
+                            previous_reference_digest != reference_digest
+                            and not st.session_state.get(VOXCPM_SEPARATE_PROMPT_AUDIO_SESSION_KEY, False)
+                        ):
+                            _clear_voxcpm_prompt_transcript()
                         st.session_state.pop(VOXCPM_REFERENCE_AUDIO_ERROR_SESSION_KEY, None)
                         uploaded_reference_audio = None
                     except (OSError, ValueError) as exc:
