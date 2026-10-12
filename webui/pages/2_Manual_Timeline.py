@@ -466,9 +466,10 @@ def main():
     if "manual_ai_starts" not in st.session_state:
         st.session_state.manual_ai_starts = {}
 
+    widget_version = int(st.session_state.get("manual_widget_version", 0))
     with st.sidebar:
         st.session_state.manual_project_id = st.text_input(
-            "Project name", st.session_state.manual_project_id, key="manual_project_name_input"
+            "Project name", st.session_state.manual_project_id, key=f"manual_project_name_input_{widget_version}"
         )
         st.caption("Scene data can be saved to or restored from JSON below.")
 
@@ -481,24 +482,24 @@ def main():
                 "Output resolution", ["480p", "720p", "1080p", "1440p", "2160p (4K)"],
                 index=["480p", "720p", "1080p", "1440p", "2160p (4K)"].index(settings.get("resolution", "480p"))
                 if settings.get("resolution", "480p") in ["480p", "720p", "1080p", "1440p", "2160p (4K)"] else 0,
-                key="manual_setting_resolution",
+                key=f"manual_setting_resolution_{widget_version}",
             )
             settings["aspect_ratio"] = st.selectbox(
                 "Aspect ratio", ["16:9", "9:16", "1:1"],
                 index=["16:9", "9:16", "1:1"].index(settings.get("aspect_ratio", "16:9"))
                 if settings.get("aspect_ratio", "16:9") in ["16:9", "9:16", "1:1"] else 0,
-                key="manual_setting_aspect",
+                key=f"manual_setting_aspect_{widget_version}",
             )
         with c2:
             settings["fps"] = st.selectbox(
                 "Frame rate (FPS)", [24, 25, 30, 50, 60],
                 index=[24, 25, 30, 50, 60].index(settings.get("fps", 24))
                 if settings.get("fps", 24) in [24, 25, 30, 50, 60] else 0,
-                key="manual_setting_fps",
+                key=f"manual_setting_fps_{widget_version}",
             )
             settings["narration_speed"] = st.slider(
                 "Narration speed (%)", -50, 100, int(settings.get("narration_speed", 0)), 5,
-                key="manual_setting_narration_speed",
+                key=f"manual_setting_narration_speed_{widget_version}",
             )
         with c3:
             settings["voice"] = st.selectbox(
@@ -506,13 +507,13 @@ def main():
                 ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"],
                 index=["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"].index(settings.get("voice", "ml-IN-MidhunNeural"))
                 if settings.get("voice", "ml-IN-MidhunNeural") in ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"] else 0,
-                key="manual_setting_voice",
+                key=f"manual_setting_voice_{widget_version}",
             )
             settings["crop_mode"] = st.selectbox(
                 "Video fitting", ["Fill and crop", "Fit with bars"],
                 index=["Fill and crop", "Fit with bars"].index(settings.get("crop_mode", "Fill and crop"))
                 if settings.get("crop_mode", "Fill and crop") in ["Fill and crop", "Fit with bars"] else 0,
-                key="manual_setting_crop_mode",
+                key=f"manual_setting_crop_mode_{widget_version}",
             )
     st.session_state.manual_project_settings = settings
 
@@ -552,13 +553,8 @@ def main():
                 st.session_state.manual_scene_rows = imported["scenes"]
                 st.session_state.manual_ai_results = {}
                 st.session_state.manual_ai_starts = {}
-                # Reset widget values so imported settings take effect on the next run.
-                for widget_key in [
-                    "manual_project_name_input", "manual_setting_resolution", "manual_setting_aspect",
-                    "manual_setting_fps", "manual_setting_narration_speed", "manual_setting_voice",
-                    "manual_setting_crop_mode",
-                ]:
-                    st.session_state.pop(widget_key, None)
+                # Give widgets new keys so imported values override old browser widget state.
+                st.session_state.manual_widget_version = widget_version + 1
                 st.success(f"Loaded {len(imported['scenes'])} scene(s) from JSON.")
                 st.rerun()
             except Exception as exc:
@@ -599,11 +595,11 @@ def main():
         with st.expander(f"🎬 {row.get('id') or f'Scene {index + 1}'} · {row.get('start', 0)}s–{row.get('end', 0)}s", expanded=(index == 0)):
             a, b, c = st.columns(3)
             with a:
-                row["id"] = st.text_input("Scene ID", str(row.get("id") or f"scene_{index + 1}"), key=f"scene_id_{index}")
-                row["start"] = st.number_input("Timeline start (seconds)", min_value=0.0, value=float(row.get("start", 0) or 0), step=1.0, key=f"scene_start_{index}")
+                row["id"] = st.text_input("Scene ID", str(row.get("id") or f"scene_{index + 1}"), key=f"scene_id_{widget_version}_{index}")
+                row["start"] = st.number_input("Timeline start (seconds)", min_value=0.0, value=float(row.get("start", 0) or 0), step=1.0, key=f"scene_start_{widget_version}_{index}")
             with b:
-                row["end"] = st.number_input("Timeline end (seconds)", min_value=0.1, value=max(0.1, float(row.get("end", 15) or 15)), step=1.0, key=f"scene_end_{index}")
-                row["source_start"] = st.number_input("Default source start (seconds)", min_value=0.0, value=float(row.get("source_start", 0) or 0), step=1.0, key=f"scene_source_start_{index}")
+                row["end"] = st.number_input("Timeline end (seconds)", min_value=0.1, value=max(0.1, float(row.get("end", 15) or 15)), step=1.0, key=f"scene_end_{widget_version}_{index}")
+                row["source_start"] = st.number_input("Default source start (seconds)", min_value=0.0, value=float(row.get("source_start", 0) or 0), step=1.0, key=f"scene_source_start_{widget_version}_{index}")
             with c:
                 current_voice = row.get("voice") or (st.session_state.manual_scene_rows[0].get("voice") if st.session_state.manual_scene_rows else "") or settings.get("voice") or "ml-IN-MidhunNeural"
                 if current_voice not in voices:
@@ -611,19 +607,19 @@ def main():
                 row["voice"] = st.selectbox(
                     "Narration voice", voices,
                     index=voices.index(current_voice),
-                    key=f"scene_voice_{index}",
+                    key=f"scene_voice_{widget_version}_{index}",
                     help="New scenes inherit Scene 1's selected voice by default. You can override any scene individually.",
                 )
-            row["narration"] = st.text_area("Narration text", str(row.get("narration") or ""), height=130, key=f"scene_narration_{index}")
+            row["narration"] = st.text_area("Narration text", str(row.get("narration") or ""), height=130, key=f"scene_narration_{widget_version}_{index}")
             row["urls"] = st.text_area(
                 "Video URLs (one per line, in playback order)", str(row.get("urls") or ""),
-                height=140, key=f"scene_urls_{index}",
+                height=140, key=f"scene_urls_{widget_version}_{index}",
                 placeholder="https://www.pexels.com/video/example-video-12345/\nhttps://cdn.example.com/clip.mp4",
             )
-            row["local_path"] = st.text_input("Optional local video file path", str(row.get("local_path") or ""), key=f"scene_local_path_{index}")
-            row["keywords"] = st.text_input("Optional Pexels fallback search keywords", str(row.get("keywords") or ""), key=f"scene_keywords_{index}")
+            row["local_path"] = st.text_input("Optional local video file path", str(row.get("local_path") or ""), key=f"scene_local_path_{widget_version}_{index}")
+            row["keywords"] = st.text_input("Optional Pexels fallback search keywords", str(row.get("keywords") or ""), key=f"scene_keywords_{widget_version}_{index}")
             row["visual_prompt"] = st.text_area(
-                "AI visual prompt", str(row.get("visual_prompt") or ""), height=80, key=f"scene_prompt_{index}",
+                "AI visual prompt", str(row.get("visual_prompt") or ""), height=80, key=f"scene_prompt_{widget_version}_{index}",
                 help="Describe the exact subject, activity, and visual style that the free local AI should match.",
             )
             st.caption("All URLs are used in the listed order. If URLs are supplied, local path and keywords are ignored.")
