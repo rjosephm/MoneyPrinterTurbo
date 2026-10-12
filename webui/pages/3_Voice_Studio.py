@@ -132,8 +132,6 @@ with test_col:
                 else:
                     audio_bytes = audio_path.read_bytes()
                     st.session_state["voice_studio_test_audio"] = audio_bytes
-                    st.audio(audio_bytes, format="audio/mp3")
-                    st.download_button("Download test narration", audio_bytes, file_name="voice_studio_test.mp3", mime="audio/mpeg")
         except Exception as exc:
             st.error("Voice test failed: " + str(exc))
 
