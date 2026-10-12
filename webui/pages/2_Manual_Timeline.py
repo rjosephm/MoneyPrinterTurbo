@@ -11,9 +11,31 @@ from urllib.parse import urlparse
 import streamlit as st
 
 from app.config import config
+from app.services import voice as voice_service, voice_profiles
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
+_BASE_TTS_VOICES = [
+    "ml-IN-MidhunNeural", "ml-IN-SobhanaNeural",
+    "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural",
+]
+
+
+def _available_voice_options():
+    return _BASE_TTS_VOICES + [
+        f"profile:{item['id']}" for item in voice_profiles.list_profiles()
+    ]
+
+
+def _voice_option_label(value):
+    if str(value).startswith("profile:"):
+        profile_id = str(value).split(":", 1)[1]
+        profile = next(
+            (item for item in voice_profiles.list_profiles() if item["id"] == profile_id),
+            None,
+        )
+        return f"Saved voice: {profile['name']}" if profile else f"Missing saved voice: {profile_id}"
+    return str(value)
 
 
 def _configured_pexels_key():
@@ -342,13 +364,34 @@ def render(project, folder):
         narration = str(scene.get("narration") or "").strip()
         audio_path = scene_folder / "narration.mp3"
         if narration:
-            try:
-                import edge_tts
-            except ImportError as exc:
-                raise RuntimeError("Install edge-tts to generate narration: pip install edge-tts") from exc
             scene_voice = str(scene.get("voice") or "").strip()
-            voice = scene_voice or str(settings.get("voice") or "ml-IN-MidhunNeural").strip()
-            asyncio.run(edge_tts.Communicate(narration, voice, rate=tts_rate).save(str(audio_path)))
+            selected_voice = scene_voice or str(settings.get("voice") or "ml-IN-MidhunNeural").strip()
+            if selected_voice.startswith("profile:"):
+                profile_id = selected_voice.split(":", 1)[1]
+                reference_audio = voice_profiles.load_profile_audio(profile_id)
+                if not config.voxcpm.get("api_key") or not config.voxcpm.get("model_id"):
+                    raise RuntimeError(
+                        "A saved reference voice requires VoxCPM API key and model ID. "
+                        "Configure them in MoneyPrinterTurbo Settings."
+                    )
+                result = voice_service.tts(
+                    text=narration,
+                    voice_name="voxcpm:default",
+                    voice_rate=max(0.5, 1.0 + narration_rate / 100.0),
+                    voice_file=str(audio_path),
+                    voice_volume=1.0,
+                    voxcpm_reference_audio=reference_audio,
+                )
+                if result is None or not audio_path.is_file() or audio_path.stat().st_size == 0:
+                    raise RuntimeError(
+                        f"VoxCPM did not generate narration for {sid}. Check API settings and logs."
+                    )
+            else:
+                try:
+                    import edge_tts
+                except ImportError as exc:
+                    raise RuntimeError("Install edge-tts to generate narration: pip install edge-tts") from exc
+                asyncio.run(edge_tts.Communicate(narration, selected_voice, rate=tts_rate).save(str(audio_path)))
             audio_input = str(audio_path)
         else:
             audio_input = "anullsrc=r=48000:cl=stereo"
@@ -502,12 +545,17 @@ def main():
                 key=f"manual_setting_narration_speed_{widget_version}",
             )
         with c3:
+            voice_options = _available_voice_options()
+            current_default_voice = settings.get("voice", "ml-IN-MidhunNeural")
+            if current_default_voice not in voice_options:
+                voice_options.append(current_default_voice)
             settings["voice"] = st.selectbox(
                 "Default TTS voice",
-                ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"],
-                index=["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"].index(settings.get("voice", "ml-IN-MidhunNeural"))
-                if settings.get("voice", "ml-IN-MidhunNeural") in ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"] else 0,
+                voice_options,
+                index=voice_options.index(current_default_voice),
+                format_func=_voice_option_label,
                 key=f"manual_setting_voice_{widget_version}",
+                help="Saved reference voices use VoxCPM and require its API key/model ID in main settings.",
             )
             settings["crop_mode"] = st.selectbox(
                 "Video fitting", ["Fill and crop", "Fit with bars"],
@@ -579,10 +627,7 @@ def main():
         st.session_state.manual_scene_rows = rows
         st.rerun()
 
-    voices = [
-        "ml-IN-MidhunNeural", "ml-IN-SobhanaNeural",
-        "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural",
-    ]
+    voices = _available_voice_options()
     for index, row in enumerate(st.session_state.manual_scene_rows):
         sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(row.get("id") or f"scene_{index + 1}"))
         row.setdefault("voice", (st.session_state.manual_scene_rows[0].get("voice") if st.session_state.manual_scene_rows else "") or settings.get("voice") or "ml-IN-MidhunNeural")
@@ -607,6 +652,7 @@ def main():
                 row["voice"] = st.selectbox(
                     "Narration voice", voices,
                     index=voices.index(current_voice),
+                    format_func=_voice_option_label,
                     key=f"scene_voice_{widget_version}_{index}",
                     help="New scenes inherit Scene 1's selected voice by default. You can override any scene individually.",
                 )
