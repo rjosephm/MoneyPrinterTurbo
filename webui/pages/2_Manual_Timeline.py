@@ -384,133 +384,284 @@ def render(project, folder):
     return output
 
 
+def _template_project(project_id="my_video"):
+    return {
+        "project_id": project_id,
+        "settings": {
+            "resolution": "480p",
+            "aspect_ratio": "16:9",
+            "fps": 24,
+            "narration_speed": 0,
+            "voice": "ml-IN-MidhunNeural",
+            "crop_mode": "Fill and crop",
+        },
+        "scenes": [],
+    }
+
+
+def _validate_imported_project(data):
+    if not isinstance(data, dict):
+        raise ValueError("JSON root must be an object.")
+    scenes = data.get("scenes")
+    if not isinstance(scenes, list):
+        raise ValueError('JSON must contain a "scenes" array.')
+    settings = data.get("settings", {})
+    if not isinstance(settings, dict):
+        raise ValueError('"settings" must be an object.')
+    required = ("id", "start", "end")
+    normalized = []
+    for index, raw in enumerate(scenes, 1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Scene {index} must be a JSON object.")
+        missing = [key for key in required if key not in raw]
+        if missing:
+            raise ValueError(f"Scene {index} is missing required field(s): {', '.join(missing)}.")
+        try:
+            start, end = float(raw["start"]), float(raw["end"])
+        except (TypeError, ValueError):
+            raise ValueError(f"Scene {index} start/end must be numbers.")
+        if start < 0 or end <= start:
+            raise ValueError(f"Scene {index} must have start >= 0 and end > start.")
+        urls = raw.get("urls", raw.get("url", ""))
+        if isinstance(urls, list):
+            urls = "\n".join(str(url) for url in urls)
+        elif not isinstance(urls, str):
+            raise ValueError(f"Scene {index} urls must be a string or array of URLs.")
+        normalized.append({
+            "id": str(raw.get("id") or f"scene_{index}"),
+            "start": start,
+            "end": end,
+            "urls": urls,
+            "local_path": str(raw.get("local_path") or ""),
+            "keywords": str(raw.get("keywords") or ""),
+            "visual_prompt": str(raw.get("visual_prompt") or "Describe the exact subject and visual style to match."),
+            "source_start": float(raw.get("source_start") or 0),
+            "narration": str(raw.get("narration") or ""),
+            "voice": str(raw.get("voice") or ""),
+        })
+    return {
+        "project_id": str(data.get("project_id") or "my_video"),
+        "settings": settings,
+        "scenes": normalized,
+    }
+
+
 def main():
     st.set_page_config(page_title="Manual Timeline Editor", page_icon="🎬", layout="wide")
     st.title("🎬 Manual Timeline Editor")
-    st.caption("Set exact scene times, paste multiple clip URLs per scene, and edit each scene's narration before rendering.")
+    st.caption("Build a scene-by-scene timeline with accordions, Malayalam narration, video sources, local AI analysis, and JSON import/export.")
     st.info(
-        "Paste one video URL per line in a scene's URL box. The editor splits that scene's duration evenly "
-        "across the supplied clips, center-crops to 16:9, and stitches them in the order listed. "
-        "Explicit URLs are never silently replaced if one fails."
+        "Open a scene accordion to edit all of its options. Paste one HTTPS direct video URL or Pexels video-page URL per line. "
+        "The editor uses every listed clip in order and divides that scene's duration equally across them."
     )
-    with st.sidebar:
-        project_id = st.text_input("Project name", "my_video")
-
-    st.subheader("Video Settings")
-    with st.expander("Resolution, aspect ratio, frame rate and narration", expanded=True):
-        setting1, setting2, setting3 = st.columns(3)
-        with setting1:
-            resolution = st.selectbox("Output resolution", ["480p", "720p", "1080p", "1440p", "2160p (4K)"], index=2)
-            aspect_ratio = st.selectbox("Aspect ratio", ["16:9", "9:16", "1:1"], index=0)
-        with setting2:
-            fps = st.selectbox("Frame rate (FPS)", [24, 25, 30, 50, 60], index=2)
-            narration_speed = st.slider("Narration speed (%)", min_value=-50, max_value=100, value=0, step=5, help="0% is normal speed; negative is slower and positive is faster.")
-        with setting3:
-            tts_voice = st.text_input("TTS voice", "ml-IN-MidhunNeural", help="Use an Edge TTS voice ID, for example ml-IN-MidhunNeural.")
-            crop_mode = st.selectbox("Video fitting", ["Fill and crop", "Fit with bars"], index=0)
-
-    settings = {
-        "resolution": resolution,
-        "aspect_ratio": aspect_ratio,
-        "fps": int(fps),
-        "narration_speed": int(narration_speed),
-        "voice": tts_voice.strip() or "ml-IN-MidhunNeural",
-        "crop_mode": crop_mode,
-    }
 
     if "manual_scene_rows" not in st.session_state:
-        st.session_state.manual_scene_rows = [{
-            "id": "scene_1", "start": 0.0, "end": 8.0, "urls": "",
-            "local_path": "", "keywords": "", "visual_prompt": "A clear, sharp wildlife video showing the target animal naturally",
-            "source_start": 0.0, "ai_source_starts": [],
-            "narration": "", "voice": "ml-IN-MidhunNeural",
-        }]
-
-    for row in st.session_state.manual_scene_rows:
-        row.setdefault("visual_prompt", "A clear, sharp wildlife video showing the target animal naturally")
-        row.pop("ai_results", None)
-        row.pop("ai_source_starts", None)
-
-    edited = st.data_editor(
-        st.session_state.manual_scene_rows,
-        num_rows="dynamic",
-        hide_index=True,
-        use_container_width=True,
-        column_order=["id", "start", "end", "local_path", "keywords", "visual_prompt", "source_start", "narration", "voice"],
-        column_config={
-            "id": st.column_config.TextColumn("Scene ID", required=True),
-            "start": st.column_config.NumberColumn("Timeline start (s)", min_value=0.0, step=1.0),
-            "end": st.column_config.NumberColumn("Timeline end (s)", min_value=0.1, step=1.0),
-            "urls": None,
-            "local_path": st.column_config.TextColumn("Local video file path", width="large"),
-            "keywords": st.column_config.TextColumn("Fallback keywords", width="medium"),
-            "visual_prompt": st.column_config.TextColumn("AI visual prompt", width="large", help="Describe exactly what the footage should show; this is matched locally against sampled frames."),
-            "source_start": st.column_config.NumberColumn("Default source in-point (s)", min_value=0.0, step=1.0),
-            "narration": st.column_config.TextColumn("Editable narration (Malayalam supported)", width="large"),
-            "voice": st.column_config.TextColumn("TTS voice"),
-        },
-    )
-    st.session_state.manual_scene_rows = edited.to_dict("records") if hasattr(edited, "to_dict") else list(edited)
-    for row in st.session_state.manual_scene_rows:
-        row.setdefault("visual_prompt", "A clear, sharp wildlife video showing the target animal naturally")
-
+        st.session_state.manual_scene_rows = []
+    if "manual_project_settings" not in st.session_state:
+        st.session_state.manual_project_settings = _template_project()["settings"].copy()
+    if "manual_project_id" not in st.session_state:
+        st.session_state.manual_project_id = "my_video"
     if "manual_ai_results" not in st.session_state:
         st.session_state.manual_ai_results = {}
     if "manual_ai_starts" not in st.session_state:
         st.session_state.manual_ai_starts = {}
 
-    st.subheader("Video URLs per scene")
-    st.caption("Paste one HTTPS direct video URL or Pexels video-page URL per line. Pexels page links and keyword search require PEXELS_API_KEY.")
-    for index, row in enumerate(st.session_state.manual_scene_rows):
-        scene_id = str(row.get("id") or f"scene_{index + 1}")
-        row.setdefault("urls", row.get("url", ""))
-        with st.expander(f"{scene_id} — {row.get('start', 0)} to {row.get('end', 0)} sec", expanded=(index == 0)):
-            row["urls"] = st.text_area(
-                "Video URLs (one per line; clips are stitched in this order)",
-                value=str(row.get("urls") or ""),
-                key=f"manual_urls_{index}_{scene_id}",
-                height=120,
-                placeholder="https://example.com/clip1.mp4\nhttps://example.com/clip2.mp4",
+    with st.sidebar:
+        st.session_state.manual_project_id = st.text_input(
+            "Project name", st.session_state.manual_project_id, key="manual_project_name_input"
+        )
+        st.caption("Scene data can be saved to or restored from JSON below.")
+
+    settings = st.session_state.manual_project_settings
+    st.subheader("Project settings")
+    with st.expander("Video resolution, aspect ratio, frame rate and narration defaults", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            settings["resolution"] = st.selectbox(
+                "Output resolution", ["480p", "720p", "1080p", "1440p", "2160p (4K)"],
+                index=["480p", "720p", "1080p", "1440p", "2160p (4K)"].index(settings.get("resolution", "480p"))
+                if settings.get("resolution", "480p") in ["480p", "720p", "1080p", "1440p", "2160p (4K)"] else 0,
+                key="manual_setting_resolution",
             )
+            settings["aspect_ratio"] = st.selectbox(
+                "Aspect ratio", ["16:9", "9:16", "1:1"],
+                index=["16:9", "9:16", "1:1"].index(settings.get("aspect_ratio", "16:9"))
+                if settings.get("aspect_ratio", "16:9") in ["16:9", "9:16", "1:1"] else 0,
+                key="manual_setting_aspect",
+            )
+        with c2:
+            settings["fps"] = st.selectbox(
+                "Frame rate (FPS)", [24, 25, 30, 50, 60],
+                index=[24, 25, 30, 50, 60].index(settings.get("fps", 24))
+                if settings.get("fps", 24) in [24, 25, 30, 50, 60] else 0,
+                key="manual_setting_fps",
+            )
+            settings["narration_speed"] = st.slider(
+                "Narration speed (%)", -50, 100, int(settings.get("narration_speed", 0)), 5,
+                key="manual_setting_narration_speed",
+            )
+        with c3:
+            settings["voice"] = st.selectbox(
+                "Default TTS voice",
+                ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"],
+                index=["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"].index(settings.get("voice", "ml-IN-MidhunNeural"))
+                if settings.get("voice", "ml-IN-MidhunNeural") in ["ml-IN-MidhunNeural", "ml-IN-SobhanaNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"] else 0,
+                key="manual_setting_voice",
+            )
+            settings["crop_mode"] = st.selectbox(
+                "Video fitting", ["Fill and crop", "Fit with bars"],
+                index=["Fill and crop", "Fit with bars"].index(settings.get("crop_mode", "Fill and crop"))
+                if settings.get("crop_mode", "Fill and crop") in ["Fill and crop", "Fit with bars"] else 0,
+                key="manual_setting_crop_mode",
+            )
+    st.session_state.manual_project_settings = settings
+
+    st.subheader("Scene JSON — import, template and export")
+    template = _template_project(st.session_state.manual_project_id or "my_video")
+    current_project = {
+        "project_id": st.session_state.manual_project_id or "my_video",
+        "settings": settings,
+        "scenes": [
+            {key: row.get(key, default) for key, default in {
+                "id": "", "start": 0, "end": 8, "urls": "", "local_path": "",
+                "keywords": "", "visual_prompt": "", "source_start": 0,
+                "narration": "", "voice": "",
+            }.items()}
+            for row in st.session_state.manual_scene_rows
+        ],
+    }
+    j1, j2, j3 = st.columns(3)
+    with j1:
+        st.download_button(
+            "Download JSON template" if not st.session_state.manual_scene_rows else "Download current scenes JSON",
+            data=json.dumps(current_project if st.session_state.manual_scene_rows else template, ensure_ascii=False, indent=2),
+            file_name="manual_timeline_template.json" if not st.session_state.manual_scene_rows else "manual_timeline_project.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    with j2:
+        uploaded_json = st.file_uploader("Upload scene JSON", type=["json"], key="manual_scene_json_upload")
+    with j3:
+        if uploaded_json is not None and st.button("Load JSON and create scenes", use_container_width=True, type="primary"):
+            try:
+                imported = _validate_imported_project(json.loads(uploaded_json.getvalue().decode("utf-8-sig")))
+                st.session_state.manual_project_id = imported["project_id"]
+                st.session_state.manual_project_settings = {
+                    **_template_project()["settings"], **imported["settings"]
+                }
+                st.session_state.manual_scene_rows = imported["scenes"]
+                st.session_state.manual_ai_results = {}
+                st.session_state.manual_ai_starts = {}
+                # Reset widget values so imported settings take effect on the next run.
+                for widget_key in [
+                    "manual_project_name_input", "manual_setting_resolution", "manual_setting_aspect",
+                    "manual_setting_fps", "manual_setting_narration_speed", "manual_setting_voice",
+                    "manual_setting_crop_mode",
+                ]:
+                    st.session_state.pop(widget_key, None)
+                st.success(f"Loaded {len(imported['scenes'])} scene(s) from JSON.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not load scene JSON: {exc}")
+
+    st.caption(
+        'JSON format: {"project_id":"birds_test","settings":{...},"scenes":[{"id":"scene_1","start":0,"end":15,"urls":["https://..."],"visual_prompt":"...","narration":"...","voice":"ml-IN-MidhunNeural"}]}. '
+        "The importer also accepts urls as a newline-separated string."
+    )
+
+    st.subheader("Scenes")
+    if st.button("➕ Add scene", use_container_width=True):
+        rows = st.session_state.manual_scene_rows
+        last_end = max([float(row.get("end", 0) or 0) for row in rows], default=0.0)
+        inherited_voice = (rows[0].get("voice") or settings.get("voice") or "ml-IN-MidhunNeural") if rows else (settings.get("voice") or "ml-IN-MidhunNeural")
+        rows.append({
+            "id": f"scene_{len(rows) + 1}", "start": last_end, "end": last_end + 15,
+            "urls": "", "local_path": "", "keywords": "",
+            "visual_prompt": "Describe the exact subject and visual style to match.",
+            "source_start": 0.0, "narration": "", "voice": inherited_voice,
+        })
+        st.session_state.manual_scene_rows = rows
+        st.rerun()
+
+    voices = [
+        "ml-IN-MidhunNeural", "ml-IN-SobhanaNeural",
+        "en-US-AriaNeural", "en-US-GuyNeural", "en-GB-SoniaNeural",
+    ]
+    for index, row in enumerate(st.session_state.manual_scene_rows):
+        sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(row.get("id") or f"scene_{index + 1}"))
+        row.setdefault("voice", (st.session_state.manual_scene_rows[0].get("voice") if st.session_state.manual_scene_rows else "") or settings.get("voice") or "ml-IN-MidhunNeural")
+        row.setdefault("urls", "")
+        row.setdefault("local_path", "")
+        row.setdefault("keywords", "")
+        row.setdefault("visual_prompt", "Describe the exact subject and visual style to match.")
+        row.setdefault("source_start", 0.0)
+        row.setdefault("narration", "")
+        with st.expander(f"🎬 {row.get('id') or f'Scene {index + 1}'} · {row.get('start', 0)}s–{row.get('end', 0)}s", expanded=(index == 0)):
+            a, b, c = st.columns(3)
+            with a:
+                row["id"] = st.text_input("Scene ID", str(row.get("id") or f"scene_{index + 1}"), key=f"scene_id_{index}")
+                row["start"] = st.number_input("Timeline start (seconds)", min_value=0.0, value=float(row.get("start", 0) or 0), step=1.0, key=f"scene_start_{index}")
+            with b:
+                row["end"] = st.number_input("Timeline end (seconds)", min_value=0.1, value=max(0.1, float(row.get("end", 15) or 15)), step=1.0, key=f"scene_end_{index}")
+                row["source_start"] = st.number_input("Default source start (seconds)", min_value=0.0, value=float(row.get("source_start", 0) or 0), step=1.0, key=f"scene_source_start_{index}")
+            with c:
+                current_voice = row.get("voice") or (st.session_state.manual_scene_rows[0].get("voice") if st.session_state.manual_scene_rows else "") or settings.get("voice") or "ml-IN-MidhunNeural"
+                if current_voice not in voices:
+                    voices = voices + [current_voice]
+                row["voice"] = st.selectbox(
+                    "Narration voice", voices,
+                    index=voices.index(current_voice),
+                    key=f"scene_voice_{index}",
+                    help="New scenes inherit Scene 1's selected voice by default. You can override any scene individually.",
+                )
+            row["narration"] = st.text_area("Narration text", str(row.get("narration") or ""), height=130, key=f"scene_narration_{index}")
+            row["urls"] = st.text_area(
+                "Video URLs (one per line, in playback order)", str(row.get("urls") or ""),
+                height=140, key=f"scene_urls_{index}",
+                placeholder="https://www.pexels.com/video/example-video-12345/\nhttps://cdn.example.com/clip.mp4",
+            )
+            row["local_path"] = st.text_input("Optional local video file path", str(row.get("local_path") or ""), key=f"scene_local_path_{index}")
+            row["keywords"] = st.text_input("Optional Pexels fallback search keywords", str(row.get("keywords") or ""), key=f"scene_keywords_{index}")
+            row["visual_prompt"] = st.text_area(
+                "AI visual prompt", str(row.get("visual_prompt") or ""), height=80, key=f"scene_prompt_{index}",
+                help="Describe the exact subject, activity, and visual style that the free local AI should match.",
+            )
+            st.caption("All URLs are used in the listed order. If URLs are supplied, local path and keywords are ignored.")
+            if st.button("Remove this scene", key=f"remove_scene_{index}"):
+                removed_id = sid
+                st.session_state.manual_scene_rows.pop(index)
+                st.session_state.manual_ai_results.pop(removed_id, None)
+                st.session_state.manual_ai_starts.pop(removed_id, None)
+                st.rerun()
 
     pexels_ready = bool(_configured_pexels_key())
     if pexels_ready:
         st.success("Pexels API key found in MoneyPrinterTurbo config (or environment).")
     else:
         st.warning("No Pexels key found. Add one in the main MoneyPrinterTurbo settings/config, or use direct HTTPS video URLs/local files.")
-    st.caption("The editor reuses app.pexels_api_keys from MoneyPrinterTurbo's config; it does not require you to paste the key into this page.")
     st.subheader("Free local AI — best-moment analysis")
-    st.caption(
-        "Uses OpenCLIP on this Windows computer (no paid AI API). On first use, "
-        "open_clip_torch and its model weights must be installed/downloaded. "
-        "It samples frames, matches them to each scene prompt, and downranks very dark/low-detail frames."
-    )
-    st.warning(
-        "AI scores visual similarity and basic image quality; it does not understand every action or guarantee "
-        "that a shot is narratively perfect. Review the selected previews before rendering."
-    )
-    if st.button("Analyze best moments (free local AI)", use_container_width=True):
+    st.caption("Uses local OpenCLIP to compare sampled frames against each scene prompt. First run may download model weights.")
+    st.warning("This ranks windows within each source; it does not automatically discard mismatched URLs. Review previews before rendering.")
+
+    if st.button("Analyze best moments (free local AI)", use_container_width=True, disabled=not st.session_state.manual_scene_rows):
         try:
             clip_bundle = _load_local_clip()
             progress = st.progress(0.0, text="Loading local AI model…")
             rows = st.session_state.manual_scene_rows
             for scene_index, row in enumerate(rows, 1):
                 sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(row.get("id") or f"scene_{scene_index}"))
-                scene_folder = OUT / project_id / f"scene_{scene_index:03d}_{sid}"
+                scene_folder = OUT / (st.session_state.manual_project_id or "my_video") / f"scene_{scene_index:03d}_{sid}"
                 sources = _resolve_sources(row, scene_folder, sid)
                 scene_duration = float(row["end"]) - float(row["start"])
+                if scene_duration <= 0:
+                    raise ValueError(f"{sid}: end time must be greater than start time.")
                 per_clip = scene_duration / max(1, len(sources))
-                prompt = str(row.get("visual_prompt") or "").strip()
-                if not prompt:
-                    prompt = str(row.get("keywords") or row.get("narration") or "").strip()
-                results = _local_ai_best_moment(
-                    sources, prompt, per_clip, scene_folder, clip_bundle
-                )
+                prompt = str(row.get("visual_prompt") or row.get("keywords") or row.get("narration") or "").strip()
+                results = _local_ai_best_moment(sources, prompt, per_clip, scene_folder, clip_bundle)
                 st.session_state.manual_ai_starts[sid] = [item["start"] for item in results]
                 st.session_state.manual_ai_results[sid] = results
                 progress.progress(scene_index / max(1, len(rows)), text=f"Analyzed {sid}")
-            st.session_state.manual_scene_rows = rows
-            st.success("Analysis complete. Review each scene's selected moment below, then render.")
+            st.success("Analysis complete. Review previews, then render.")
         except Exception as exc:
             st.error(f"AI analysis failed: {exc}")
 
@@ -520,10 +671,7 @@ def main():
         if results:
             with st.expander(f"AI preview — {row.get('id', f'scene_{index + 1}')}", expanded=True):
                 for clip_index, item in enumerate(results, 1):
-                    st.markdown(
-                        f"**Clip {clip_index}:** start at {item['start']:.1f}s · "
-                        f"match/quality score {item['score']:.3f} · source duration {item['duration']:.1f}s"
-                    )
+                    st.markdown(f"**Clip {clip_index}:** start at {item['start']:.1f}s · score {item['score']:.3f} · duration {item['duration']:.1f}s")
                     if Path(item["preview"]).is_file():
                         st.image(item["preview"], caption=f"Selected frame from clip {clip_index}", width=360)
                 if st.button("Clear AI selection for this scene", key=f"clear_ai_{index}"):
@@ -531,7 +679,7 @@ def main():
                     st.session_state.manual_ai_results.pop(sid, None)
                     st.rerun()
 
-    project_id = re.sub(r"[^A-Za-z0-9_-]", "_", project_id) or "my_video"
+    project_id = re.sub(r"[^A-Za-z0-9_-]", "_", st.session_state.manual_project_id or "my_video") or "my_video"
     project_scenes = []
     for index, row in enumerate(st.session_state.manual_scene_rows, 1):
         scene = dict(row)
@@ -542,13 +690,13 @@ def main():
 
     left, right = st.columns(2)
     with left:
-        if st.button("Save scene plan", use_container_width=True):
+        if st.button("Save scene plan JSON to disk", use_container_width=True):
             path = OUT / project_id / "scene_plan.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
             st.success(f"Saved: {path}")
     with right:
-        if st.button("Render video", type="primary", use_container_width=True):
+        if st.button("Render video", type="primary", use_container_width=True, disabled=not project_scenes):
             try:
                 output = render(project, OUT / project_id)
                 st.video(str(output))
