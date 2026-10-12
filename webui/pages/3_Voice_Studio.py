@@ -45,10 +45,29 @@ if profiles:
                 st.rerun()
 
 st.divider()
-st.subheader("Create or update a voice profile")
-profile_name = st.text_input("Profile name", value="My Malayalam Voice", max_chars=80)
+st.subheader("Create or test a voice profile")
+profile_choices = ["__new__"] + [item["id"] for item in profiles]
+selected_existing_profile = st.selectbox(
+    "Start from an existing profile (optional)",
+    profile_choices,
+    format_func=lambda profile_id: (
+        "Create a new profile from an upload"
+        if profile_id == "__new__"
+        else next((item["name"] for item in profiles if item["id"] == profile_id), profile_id)
+    ),
+    key="voice_studio_existing_profile",
+)
+existing_profile = next(
+    (item for item in profiles if item["id"] == selected_existing_profile), None
+)
+profile_name = st.text_input(
+    "Profile name",
+    value=existing_profile["name"] if existing_profile else "My Malayalam Voice",
+    max_chars=80,
+    key="voice_studio_profile_name_" + selected_existing_profile,
+)
 uploaded = st.file_uploader(
-    "Upload reference recording",
+    "Upload or replace reference recording",
     type=list(voice.VOXCPM_REFERENCE_AUDIO_FILE_TYPES),
     help="Use a clean recording with one speaker and minimal background music/noise. Maximum 20 MiB and 120 seconds.",
     key="voice_studio_reference_upload",
@@ -66,12 +85,18 @@ if uploaded is not None:
             with st.spinner("Preparing reference audio…"):
                 reference_wav = voice.prepare_voxcpm_reference_audio(raw, Path(uploaded.name).suffix)
             st.session_state["voice_studio_normalized"] = {"digest": digest, "wav": reference_wav}
-        except (ValueError, OSError, RuntimeError) as exc:
+        except Exception as exc:
             st.session_state.pop("voice_studio_normalized", None)
             st.error("Could not prepare the recording: " + str(exc))
-    if reference_wav:
-        st.audio(reference_wav, format="audio/wav")
-        st.caption("Normalized reference: mono, 16 kHz WAV. The original upload is not modified.")
+elif existing_profile:
+    try:
+        reference_wav = voice_profiles.load_profile_audio(existing_profile["id"])
+    except (OSError, ValueError) as exc:
+        st.error(str(exc))
+
+if reference_wav:
+    st.audio(reference_wav, format="audio/wav")
+    st.caption("Reference audio: normalized mono, 16 kHz WAV. The original upload is not modified.")
 
 test_text = st.text_area(
     "Test narration",
@@ -111,5 +136,17 @@ with test_col:
                     st.download_button("Download test narration", audio_bytes, file_name="voice_studio_test.mp3", mime="audio/mpeg")
         except Exception as exc:
             st.error("Voice test failed: " + str(exc))
+
+preview_audio = st.session_state.get("voice_studio_test_audio")
+if preview_audio:
+    st.subheader("Latest test narration")
+    st.audio(preview_audio, format="audio/mp3")
+    st.download_button(
+        "Download latest test narration",
+        preview_audio,
+        file_name="voice_studio_test.mp3",
+        mime="audio/mpeg",
+        key="download_latest_voice_studio_test",
+    )
 
 st.caption("Saved profiles are stored locally under storage/voice_profiles. Manual Timeline and automatic generation can use the same profile. Reference audio is sent to the configured VoxCPM endpoint when you generate speech.")
