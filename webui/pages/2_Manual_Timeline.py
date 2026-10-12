@@ -347,7 +347,7 @@ def render(project, folder):
             except ImportError as exc:
                 raise RuntimeError("Install edge-tts to generate narration: pip install edge-tts") from exc
             scene_voice = str(scene.get("voice") or "").strip()
-            voice = str(settings.get("voice") or "ml-IN-MidhunNeural").strip() if scene_voice in ("", "ml-IN-MidhunNeural") else scene_voice
+            voice = scene_voice or str(settings.get("voice") or "ml-IN-MidhunNeural").strip()
             asyncio.run(edge_tts.Communicate(narration, voice, rate=tts_rate).save(str(audio_path)))
             audio_input = str(audio_path)
         else:
