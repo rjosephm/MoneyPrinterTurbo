@@ -58,6 +58,7 @@ from app.services import (
     video,
     volcengine_seedance,
     voice,
+    voice_profiles,
     webui_task,
 )
 from app.services import elevenlabs_music as elevenlabs_music_service
@@ -7319,15 +7320,48 @@ def _render_audio_settings(panel, params):
                     (voxcpm_base_url or DEFAULT_VOXCPM_BASE_URL).strip().rstrip("/"),
                 )
 
-                uploaded_reference_audio = st.file_uploader(
-                    tr("VoxCPM Reference Audio"),
-                    type=list(voice.VOXCPM_REFERENCE_AUDIO_FILE_TYPES),
-                    key="voxcpm_reference_audio_uploader",
-                    help=tr("VoxCPM Reference Audio Help"),
+                saved_voice_profiles = voice_profiles.list_profiles()
+                profile_ids = ["__upload__"] + [item["id"] for item in saved_voice_profiles]
+                selected_profile_id = st.selectbox(
+                    "Saved reference voice profile",
+                    profile_ids,
+                    format_func=lambda profile_id: (
+                        "Upload a new reference below"
+                        if profile_id == "__upload__"
+                        else next(
+                            (item["name"] for item in saved_voice_profiles if item["id"] == profile_id),
+                            profile_id,
+                        )
+                    ),
+                    key="voxcpm_saved_profile_selector",
+                    help="Create profiles in the Reference Voice Studio page, then select one here to reuse it.",
                 )
-                reference_audio = _sync_voxcpm_reference_audio(
-                    uploaded_reference_audio
-                )
+                if selected_profile_id != "__upload__":
+                    try:
+                        reference_audio = voice_profiles.load_profile_audio(selected_profile_id)
+                        reference_digest = hashlib.sha256(reference_audio).hexdigest()
+                        st.session_state[VOXCPM_REFERENCE_AUDIO_SESSION_KEY] = {
+                            "upload_digest": "saved-profile:" + selected_profile_id,
+                            "audio_digest": reference_digest,
+                            "audio_bytes": reference_audio,
+                        }
+                        st.session_state.pop(VOXCPM_REFERENCE_AUDIO_ERROR_SESSION_KEY, None)
+                        uploaded_reference_audio = None
+                    except (OSError, ValueError) as exc:
+                        st.session_state.pop(VOXCPM_REFERENCE_AUDIO_SESSION_KEY, None)
+                        st.session_state[VOXCPM_REFERENCE_AUDIO_ERROR_SESSION_KEY] = str(exc)
+                        reference_audio = None
+                        uploaded_reference_audio = None
+                else:
+                    uploaded_reference_audio = st.file_uploader(
+                        tr("VoxCPM Reference Audio"),
+                        type=list(voice.VOXCPM_REFERENCE_AUDIO_FILE_TYPES),
+                        key="voxcpm_reference_audio_uploader",
+                        help=tr("VoxCPM Reference Audio Help"),
+                    )
+                    reference_audio = _sync_voxcpm_reference_audio(
+                        uploaded_reference_audio
+                    )
                 st.caption(tr("VoxCPM Reference Audio Notice"))
                 reference_audio_error = st.session_state.get(
                     VOXCPM_REFERENCE_AUDIO_ERROR_SESSION_KEY
