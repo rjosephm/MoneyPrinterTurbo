@@ -1,5 +1,8 @@
 """Reference Voice Studio: save and test reusable VoxCPM voice profiles."""
 import hashlib
+import math
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -12,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from app.config import config
 from app.services import voice, voice_profiles
+from app.utils import utils
 
 
 st.title("Reference Voice Studio")
@@ -103,6 +107,12 @@ test_text = st.text_area(
     value="നമസ്കാരം സുഹൃത്തുക്കളേ, ഇന്ന് നമുക്ക് അതിശയകരമായ അഞ്ച് മനോഹരമായ പക്ഷികളെ പരിചയപ്പെടാം.",
     height=110,
 )
+pitch_col, speed_col = st.columns(2)
+with pitch_col:
+    pitch_semitones = st.slider("Pitch adjustment (semitones)", -4, 4, 0, 1)
+with speed_col:
+    speed_percent = st.slider("Speaking speed adjustment (%)", -20, 20, 0, 5)
+st.caption("Pitch and speed adjustments apply to the test preview only. The saved profile preserves the reference speaker identity.")
 save_col, test_col = st.columns(2)
 with save_col:
     if st.button("Save voice profile", type="primary", use_container_width=True, disabled=not bool(reference_wav)):
@@ -117,19 +127,40 @@ with test_col:
     if st.button("Generate test narration", use_container_width=True, disabled=not (reference_wav and api_ready and bool(test_text.strip()))):
         try:
             with tempfile.TemporaryDirectory(prefix="mpt-voice-studio-") as temp_dir:
+                raw_audio_path = Path(temp_dir) / "voice_test_raw.mp3"
                 audio_path = Path(temp_dir) / "voice_test.mp3"
                 with st.spinner("Generating a test with VoxCPM…"):
                     result = voice.tts(
                         text=test_text.strip(),
                         voice_name="voxcpm:default",
                         voice_rate=1.0,
-                        voice_file=str(audio_path),
+                        voice_file=str(raw_audio_path),
                         voice_volume=1.0,
                         voxcpm_reference_audio=reference_wav,
                     )
-                if result is None or not audio_path.is_file() or audio_path.stat().st_size == 0:
+                if result is None or not raw_audio_path.is_file() or raw_audio_path.stat().st_size == 0:
                     st.error("VoxCPM did not return audio. Check the API key, model ID, endpoint, and MoneyPrinterTurbo logs.")
                 else:
+                    if pitch_semitones or speed_percent:
+                        ffmpeg = utils.get_ffmpeg_binary() or shutil.which("ffmpeg")
+                        if not ffmpeg:
+                            raise RuntimeError("FFmpeg is required for pitch/speed preview adjustments.")
+                        pitch_ratio = 2 ** (pitch_semitones / 12.0)
+                        speed_ratio = 1.0 + speed_percent / 100.0
+                        filters = (
+                            f"asetrate=48000*{pitch_ratio:.8f},aresample=48000,"
+                            f"atempo={1.0 / pitch_ratio:.8f},atempo={speed_ratio:.3f}"
+                        )
+                        processed = subprocess.run(
+                            [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                             "-i", str(raw_audio_path), "-af", filters, "-c:a", "libmp3lame",
+                             "-q:a", "2", str(audio_path)],
+                            capture_output=True, text=True, timeout=180,
+                        )
+                        if processed.returncode or not audio_path.is_file() or audio_path.stat().st_size == 0:
+                            raise RuntimeError((processed.stderr or "FFmpeg audio processing failed")[-2000:])
+                    else:
+                        audio_path = raw_audio_path
                     audio_bytes = audio_path.read_bytes()
                     st.session_state["voice_studio_test_audio"] = audio_bytes
         except Exception as exc:
