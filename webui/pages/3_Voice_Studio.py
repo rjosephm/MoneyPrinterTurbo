@@ -1,6 +1,5 @@
 """Reference Voice Studio: save and test reusable VoxCPM voice profiles."""
 import hashlib
-import math
 import shutil
 import subprocess
 import sys
