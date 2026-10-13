@@ -59,6 +59,7 @@ from app.services import (
     volcengine_seedance,
     voice,
     voice_profiles,
+    indicf5_profiles,
     webui_task,
 )
 from app.services import elevenlabs_music as elevenlabs_music_service
@@ -1501,6 +1502,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "fish_audio"
     if voice.is_voxcpm_voice(voice_name):
         return "voxcpm"
+    if voice.is_indicf5_voice(voice_name):
+        return "indicf5"
     if voice.is_azure_v2_voice(voice_name):
         return "azure-tts-v2"
     return "azure-tts-v1"
@@ -6951,6 +6954,7 @@ def _render_audio_settings(panel, params):
                 ("kokoro", "Kokoro TTS"),
                 ("fish_audio", "Fish Audio TTS"),
                 ("voxcpm", "VoxCPM TTS"),
+                ("indicf5", "IndicF5 (Local Malayalam)"),
             ]
 
             tts_server_values = [server_value for server_value, _ in tts_servers]
@@ -6979,6 +6983,8 @@ def _render_audio_settings(panel, params):
                 provider_tips = get_tts_provider_tips(selected_tts_server)
                 if provider_tips:
                     st.info(provider_tips)
+                if selected_tts_server == "indicf5":
+                    st.info("Uses your local IndicF5 API at http://127.0.0.1:8765. Create and manage saved profiles in the IndicF5 Profiles page.")
 
             # MiniMax 只复用下方通用“配音声音”选择器。Provider 配置函数负责
             # 刷新远端音色并返回友好文案，不再额外渲染 Voice ID 和音色下拉框。
@@ -7028,6 +7034,10 @@ def _render_audio_settings(panel, params):
                 filtered_voices = voice.get_fish_audio_voices()
             elif selected_tts_server == "voxcpm":
                 filtered_voices = voice.get_voxcpm_voices()
+            elif selected_tts_server == "indicf5":
+                filtered_voices = [
+                    f"indicf5:{item['id']}" for item in indicf5_profiles.list_profiles()
+                ]
             else:
                 # 获取Azure的声音列表
                 all_voices = voice.get_all_azure_voices(filter_locals=None)
@@ -7063,6 +7073,10 @@ def _render_audio_settings(panel, params):
                     )
                 if voice.is_voxcpm_voice(v):
                     return v.split(":", 1)[1] or DEFAULT_VOXCPM_VOICE
+                if voice.is_indicf5_voice(v):
+                    profile_id = v.split(":", 1)[1]
+                    profile = next((p for p in indicf5_profiles.list_profiles() if p["id"] == profile_id), None)
+                    return f"IndicF5: {profile['name']}" if profile else f"Missing profile: {profile_id}"
                 return (
                     v.replace("Female", tr("Female"))
                     .replace("Male", tr("Male"))
