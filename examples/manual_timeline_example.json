@@ -1,0 +1,25 @@
+{
+  "project_id": "my_video",
+  "settings": {
+    "resolution": "480p",
+    "aspect_ratio": "16:9",
+    "fps": 24,
+    "narration_speed": 0,
+    "voice": "ml-IN-MidhunNeural",
+    "crop_mode": "Fill and crop"
+  },
+  "scenes": [
+    {
+      "id": "scene_1",
+      "start": 0,
+      "end": 15,
+      "source_start": 0,
+      "voice": "indicf5:ml-female-01",
+      "narration": "ഇവിടെ നിങ്ങളുടെ മലയാളം വിവരണം ചേർക്കുക.",
+      "urls": [],
+      "local_path": "",
+      "keywords": "peacock displaying colorful tail",
+      "visual_prompt": "Photorealistic peacock displaying its colorful tail feathers, natural daylight, wildlife documentary footage"
+    }
+  ]
+}
