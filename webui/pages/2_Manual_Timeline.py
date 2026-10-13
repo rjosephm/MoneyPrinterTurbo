@@ -799,7 +799,7 @@ def main():
                 # Keep the panel readable for long jobs without losing the latest steps.
                 visible_logs = render_logs[-80:]
                 progress_bar.progress(percent, text=f"{percent}% — {message}")
-                log_panel.code("\\n".join(visible_logs), language="text")
+                log_panel.code("\n".join(visible_logs), language="text")
 
             try:
                 update_render_progress(0, "Render requested. Validating scenes…")
@@ -809,7 +809,7 @@ def main():
                 st.download_button("Download rendered video", output.read_bytes(), file_name=output.name, mime="video/mp4")
             except Exception as exc:
                 render_logs.append(f"[ERROR] {exc}")
-                log_panel.code("\\n".join(render_logs[-80:]), language="text")
+                log_panel.code("\n".join(render_logs[-80:]), language="text")
                 st.error(f"Render failed: {exc}")
 
 
