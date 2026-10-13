@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import streamlit as st
 
 from app.config import config
-from app.services import voice as voice_service, voice_profiles, indicf5_profiles
+from app.services import voice as voice_service, indicf5_profiles
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
@@ -22,21 +22,12 @@ _BASE_TTS_VOICES = [
 
 
 def _available_voice_options():
-    return (
-        _BASE_TTS_VOICES
-        + [f"profile:{item['id']}" for item in voice_profiles.list_profiles()]
-        + [f"indicf5:{item['id']}" for item in indicf5_profiles.list_profiles()]
-    )
+    return _BASE_TTS_VOICES + [
+        f"indicf5:{item['id']}" for item in indicf5_profiles.list_profiles()
+    ]
 
 
 def _voice_option_label(value):
-    if str(value).startswith("profile:"):
-        profile_id = str(value).split(":", 1)[1]
-        profile = next(
-            (item for item in voice_profiles.list_profiles() if item["id"] == profile_id),
-            None,
-        )
-        return f"VoxCPM profile: {profile['name']}" if profile else f"Missing saved voice: {profile_id}"
     if str(value).startswith("indicf5:"):
         profile_id = str(value).split(":", 1)[1]
         profile = next(
@@ -387,26 +378,6 @@ def render(project, folder):
                     raise RuntimeError(
                         f"IndicF5 did not generate narration for {sid}. Check the local API and saved profile."
                     )
-            elif selected_voice.startswith("profile:"):
-                profile_id = selected_voice.split(":", 1)[1]
-                reference_audio = voice_profiles.load_profile_audio(profile_id)
-                if not config.voxcpm.get("api_key") or not config.voxcpm.get("model_id"):
-                    raise RuntimeError(
-                        "A saved reference voice requires VoxCPM API key and model ID. "
-                        "Configure them in MoneyPrinterTurbo Settings."
-                    )
-                result = voice_service.tts(
-                    text=narration,
-                    voice_name="voxcpm:default",
-                    voice_rate=max(0.5, 1.0 + narration_rate / 100.0),
-                    voice_file=str(audio_path),
-                    voice_volume=1.0,
-                    voxcpm_reference_audio=reference_audio,
-                )
-                if result is None or not audio_path.is_file() or audio_path.stat().st_size == 0:
-                    raise RuntimeError(
-                        f"VoxCPM did not generate narration for {sid}. Check API settings and logs."
-                    )
             else:
                 try:
                     import edge_tts
@@ -576,7 +547,7 @@ def main():
                 index=voice_options.index(current_default_voice),
                 format_func=_voice_option_label,
                 key=f"manual_setting_voice_{widget_version}",
-                help="Saved reference voices use VoxCPM and require its API key/model ID in main settings.",
+                help="Choose an existing TTS voice or a saved local IndicF5 profile. Manage IndicF5 profiles in the IndicF5 Profiles page.",
             )
             settings["crop_mode"] = st.selectbox(
                 "Video fitting", ["Fill and crop", "Fit with bars"],
