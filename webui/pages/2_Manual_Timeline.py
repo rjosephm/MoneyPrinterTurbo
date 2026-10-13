@@ -808,7 +808,8 @@ def main():
                 st.video(str(output))
                 st.download_button("Download rendered video", output.read_bytes(), file_name=output.name, mime="video/mp4")
             except Exception as exc:
-                update_render_progress(progress_bar if False else 0, f"ERROR: {exc}")
+                render_logs.append(f"[ERROR] {exc}")
+                log_panel.code("\\n".join(render_logs[-80:]), language="text")
                 st.error(f"Render failed: {exc}")
 
 
