@@ -292,11 +292,18 @@ def _local_ai_best_moment(sources, prompt, wanted_duration, work_folder, clip_bu
         })
     return results
 
-def render(project, folder):
+def render(project, folder, progress_callback=None):
+    """Render the timeline and optionally report percentage progress and readable log messages."""
+    def report(percent, message):
+        percent = max(0, min(100, int(percent)))
+        if progress_callback:
+            progress_callback(percent, message)
+
     ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         raise RuntimeError("FFmpeg and FFprobe must be installed and available on PATH.")
 
+    report(0, "Checking timeline and output settings…")
     scenes = sorted(project["scenes"], key=lambda row: float(row["start"]))
     if not scenes:
         raise ValueError("Add at least one scene.")
@@ -322,11 +329,16 @@ def render(project, folder):
         video_filter = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps={fps},setsar=1"
     folder.mkdir(parents=True, exist_ok=True)
     scene_parts = []
+    scene_count = len(scenes)
     for scene_index, scene in enumerate(scenes, 1):
+        scene_base = ((scene_index - 1) / scene_count) * 92
+        scene_span = 92 / scene_count
         sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(scene.get("id") or f"scene_{scene_index}"))
+        report(scene_base, f"Scene {scene_index}/{scene_count} ({sid}): finding and preparing video sources…")
         scene_folder = folder / f"scene_{scene_index:03d}_{sid}"
         scene_folder.mkdir(parents=True, exist_ok=True)
         sources = _resolve_sources(scene, scene_folder, sid)
+        report(scene_base + scene_span * 0.08, f"Scene {scene_index}/{scene_count} ({sid}): {len(sources)} source clip(s) ready.")
         start, end = float(scene["start"]), float(scene["end"])
         duration = end - start
         per_clip = duration / len(sources)
@@ -336,6 +348,11 @@ def render(project, folder):
 
         # Each supplied source gets an equal share; AI-selected in-points override the default.
         for clip_index, source in enumerate(sources, 1):
+            clip_fraction = clip_index / max(1, len(sources))
+            report(
+                scene_base + scene_span * (0.08 + 0.48 * (clip_index - 1) / max(1, len(sources))),
+                f"Scene {scene_index}/{scene_count} ({sid}): encoding clip {clip_index}/{len(sources)} — {Path(source).name}",
+            )
             source_start = max(0.0, float(ai_starts[clip_index - 1])) if clip_index <= len(ai_starts) else default_source_start
             clip_path = scene_folder / f"clip_{clip_index:02d}.mp4"
             _run([
@@ -348,7 +365,12 @@ def render(project, folder):
                 str(clip_path),
             ])
             silent_clips.append(clip_path)
+            report(
+                scene_base + scene_span * (0.08 + 0.48 * clip_fraction),
+                f"Scene {scene_index}/{scene_count} ({sid}): finished clip {clip_index}/{len(sources)}.",
+            )
 
+        report(scene_base + scene_span * 0.59, f"Scene {scene_index}/{scene_count} ({sid}): stitching clips…")
         concat_list = scene_folder / "clips.txt"
         concat_list.write_text(
             "".join(f"file '{path.resolve().as_posix()}'\n" for path in silent_clips),
@@ -361,6 +383,7 @@ def render(project, folder):
             "-t", f"{duration:.6f}", "-c", "copy", str(stitched),
         ])
 
+        report(scene_base + scene_span * 0.68, f"Scene {scene_index}/{scene_count} ({sid}): preparing narration audio…")
         narration = str(scene.get("narration") or "").strip()
         audio_path = scene_folder / "narration.mp3"
         if narration:
@@ -388,6 +411,7 @@ def render(project, folder):
         else:
             audio_input = "anullsrc=r=48000:cl=stereo"
 
+        report(scene_base + scene_span * 0.82, f"Scene {scene_index}/{scene_count} ({sid}): muxing video and audio…")
         scene_output = folder / f"{scene_index:03d}_{sid}.mp4"
         cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -404,7 +428,9 @@ def render(project, folder):
             "-ar", "48000", "-ac", "2", "-movflags", "+faststart", str(scene_output),
         ])
         scene_parts.append(scene_output)
+        report(scene_base + scene_span * 0.98, f"Scene {scene_index}/{scene_count} ({sid}) complete.")
 
+    report(95, "Combining all scenes into the final video…")
     concat = folder / "timeline.txt"
     concat.write_text(
         "".join(f"file '{path.resolve().as_posix()}'\n" for path in scene_parts),
@@ -416,6 +442,8 @@ def render(project, folder):
         "-f", "concat", "-safe", "0", "-i", str(concat),
         "-c", "copy", "-movflags", "+faststart", str(output),
     ])
+    report(99, "Final video assembled. Finishing output file…")
+    report(100, f"Render complete: {output}")
     return output
 
 
@@ -762,12 +790,26 @@ def main():
             st.success(f"Saved: {path}")
     with right:
         if st.button("Render video", type="primary", use_container_width=True, disabled=not project_scenes):
+            progress_bar = st.progress(0, text="Starting render…")
+            log_panel = st.empty()
+            render_logs = []
+
+            def update_render_progress(percent, message):
+                render_logs.append(f"[{percent:3d}%] {message}")
+                # Keep the panel readable for long jobs without losing the latest steps.
+                visible_logs = render_logs[-80:]
+                progress_bar.progress(percent, text=f"{percent}% — {message}")
+                log_panel.code("\\n".join(visible_logs), language="text")
+
             try:
-                output = render(project, OUT / project_id)
+                update_render_progress(0, "Render requested. Validating scenes…")
+                output = render(project, OUT / project_id, progress_callback=update_render_progress)
+                st.success(f"Video created successfully: {output.name}")
                 st.video(str(output))
                 st.download_button("Download rendered video", output.read_bytes(), file_name=output.name, mime="video/mp4")
             except Exception as exc:
-                st.error(str(exc))
+                update_render_progress(progress_bar if False else 0, f"ERROR: {exc}")
+                st.error(f"Render failed: {exc}")
 
 
 if __name__ == "__main__":
