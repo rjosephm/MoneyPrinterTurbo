@@ -548,6 +548,8 @@ def is_azure_v1_voice(voice_name: str | None) -> bool:
         return False
     if is_voxcpm_voice(name):
         return False
+    if is_indicf5_voice(name):
+        return False
     return True
 
 
