@@ -29,6 +29,7 @@ from openai import OpenAI
 
 from app.config import config
 from app.services import bgm
+from app.services import indicf5_profiles
 from app.utils import utils
 from app.utils.subtitle_reader import moviepy_subtitles
 from app.utils.subtitle_writer import staged_subtitle_file
@@ -495,6 +496,10 @@ def is_voxcpm_voice(voice_name: str | None) -> bool:
     return (voice_name or "").startswith("voxcpm:")
 
 
+def is_indicf5_voice(voice_name: str | None) -> bool:
+    return (voice_name or "").startswith("indicf5:")
+
+
 def get_fish_audio_api_key() -> str:
     configured_key = str(config.fish_audio.get("api_key", "") if hasattr(config, "fish_audio") and isinstance(config.fish_audio, dict) else "").strip()
     return configured_key or os.getenv("FISH_API_KEY", "").strip()
@@ -630,6 +635,129 @@ def generate_silent_audio(duration_seconds: float, output_file: str) -> bool:
     return _publish_tts_ffmpeg_output(command, output_file, "silent narration encode")
 
 
+def indicf5_tts(
+    text: str,
+    profile_id: str,
+    voice_file: str,
+    voice_rate: float = 1.0,
+    voice_volume: float = 1.0,
+) -> Union[SubMaker, None]:
+    """Synthesize narration through the local IndicF5 HTTP API and reuse a saved profile."""
+    raw_path = None
+    staged_path = None
+    try:
+        profile = indicf5_profiles.get_profile(profile_id)
+        reference_audio = str(profile.get("reference_audio") or "").strip()
+        reference_text = str(profile.get("reference_text") or "").strip()
+        api_url = str(profile.get("api_url") or indicf5_profiles.DEFAULT_API_URL).rstrip("/")
+        if not reference_audio or not os.path.isfile(reference_audio):
+            raise FileNotFoundError(
+                f"Reference WAV for IndicF5 profile '{profile_id}' is missing: {reference_audio}"
+            )
+        if not reference_text:
+            raise ValueError(f"IndicF5 profile '{profile_id}' has no reference transcript.")
+        if not text or not str(text).strip():
+            raise ValueError("IndicF5 narration text is empty.")
+
+        response = requests.post(
+            f"{api_url}/generate",
+            json={
+                "text": str(text),
+                "reference_text": reference_text,
+                "reference_audio": reference_audio,
+            },
+            timeout=(10, 300),
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"IndicF5 API returned HTTP {response.status_code}: {response.text[:1000]}"
+            )
+        wav_bytes = response.content
+        if not wav_bytes.startswith(b"RIFF") or wav_bytes[8:12] != b"WAVE":
+            raise ValueError("IndicF5 API did not return a valid WAV audio response.")
+
+        ensure_file_path_exists(voice_file)
+        output_dir = os.path.dirname(os.path.abspath(voice_file))
+        with tempfile.NamedTemporaryFile(
+            prefix=".indicf5-source-", suffix=".wav", dir=output_dir, delete=False
+        ) as handle:
+            raw_path = handle.name
+            handle.write(wav_bytes)
+
+        extension = os.path.splitext(voice_file)[1].lower()
+        with tempfile.NamedTemporaryFile(
+            prefix=".indicf5-output-", suffix=extension or ".mp3",
+            dir=output_dir, delete=False
+        ) as handle:
+            staged_path = handle.name
+
+        filters = []
+        try:
+            rate = float(voice_rate)
+        except (TypeError, ValueError):
+            rate = 1.0
+        if not math.isfinite(rate):
+            rate = 1.0
+        rate = min(2.0, max(0.5, rate))
+        if abs(rate - 1.0) > 0.001:
+            filters.append(f"atempo={rate:.5f}")
+        try:
+            volume = float(voice_volume)
+        except (TypeError, ValueError):
+            volume = 1.0
+        if not math.isfinite(volume) or volume < 0:
+            volume = 1.0
+        if abs(volume - 1.0) > 0.001:
+            filters.append(f"volume={volume:.5f}")
+
+        command = [
+            utils.get_ffmpeg_binary(), "-hide_banner", "-loglevel", "error",
+            "-nostdin", "-y", "-i", raw_path, "-vn",
+        ]
+        if filters:
+            command += ["-af", ",".join(filters)]
+        if extension == ".wav":
+            command += ["-c:a", "pcm_s16le"]
+        elif extension == ".mp3":
+            command += ["-c:a", "libmp3lame", "-q:a", "4"]
+        command.append(staged_path)
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=300, check=False,
+        )
+        if result.returncode or not os.path.isfile(staged_path) or os.path.getsize(staged_path) == 0:
+            raise RuntimeError(
+                "FFmpeg could not convert IndicF5 audio: "
+                + (result.stderr or result.stdout or "no output")[-1500:]
+            )
+        os.replace(staged_path, voice_file)
+        staged_path = None
+
+        clip = AudioFileClip(voice_file)
+        try:
+            duration = float(clip.duration or 0)
+        finally:
+            clip.close()
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError("IndicF5 generated an invalid audio duration.")
+        logger.success(f"IndicF5 TTS succeeded using saved profile: {profile_id}")
+        return populate_legacy_submaker_with_full_text(
+            sub_maker=ensure_legacy_submaker_fields(SubMaker()),
+            text=text,
+            audio_duration_seconds=duration,
+        )
+    except Exception as exc:
+        logger.error(f"IndicF5 TTS failed: {exc}")
+        return None
+    finally:
+        for temporary_path in (raw_path, staged_path):
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+
+
 def _single_tts(
     text: str,
     voice_name: str,
@@ -640,6 +768,13 @@ def _single_tts(
     voxcpm_prompt_audio: bytes | None = None,
     voxcpm_prompt_text: str = "",
 ) -> Union[SubMaker, None]:
+    if is_indicf5_voice(voice_name):
+        profile_id = str(voice_name).split(":", 1)[1].strip()
+        if not profile_id:
+            logger.error("Invalid IndicF5 voice profile name")
+            return None
+        return indicf5_tts(text, profile_id, voice_file, voice_rate, voice_volume)
+
     if is_no_voice(voice_name):
         duration_seconds = estimate_no_voice_duration(text)
         if not generate_silent_audio(duration_seconds, voice_file):
