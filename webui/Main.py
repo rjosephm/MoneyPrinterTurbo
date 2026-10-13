@@ -1500,8 +1500,6 @@ def _infer_tts_server_from_voice(voice_name):
         return "kokoro"
     if voice.is_fish_audio_voice(voice_name):
         return "fish_audio"
-    if voice.is_voxcpm_voice(voice_name):
-        return "voxcpm"
     if voice.is_indicf5_voice(voice_name):
         return "indicf5"
     if voice.is_azure_v2_voice(voice_name):
@@ -6953,7 +6951,6 @@ def _render_audio_settings(panel, params):
                 ("chatterbox", "Chatterbox TTS"),
                 ("kokoro", "Kokoro TTS"),
                 ("fish_audio", "Fish Audio TTS"),
-                ("voxcpm", "VoxCPM TTS"),
                 ("indicf5", "IndicF5 (Local Malayalam)"),
             ]
 
@@ -7032,8 +7029,6 @@ def _render_audio_settings(panel, params):
                 filtered_voices = _get_kokoro_voice_options(saved_voice_name)
             elif selected_tts_server == "fish_audio":
                 filtered_voices = voice.get_fish_audio_voices()
-            elif selected_tts_server == "voxcpm":
-                filtered_voices = voice.get_voxcpm_voices()
             elif selected_tts_server == "indicf5":
                 filtered_voices = [
                     f"indicf5:{item['id']}" for item in indicf5_profiles.list_profiles()
