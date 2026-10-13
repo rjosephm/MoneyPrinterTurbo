@@ -479,8 +479,11 @@ def _validate_imported_project(data):
         # Accept profile IDs and their UI label form, storing the internal option value.
         if scene_voice.lower().startswith("indicf5 profile:"):
             scene_voice = "indicf5:" + scene_voice.split(":", 1)[1].strip()
-        elif scene_voice and scene_voice.startswith("ml-female-") or scene_voice.startswith("ml-male-"):
+        elif scene_voice.startswith(("ml-female-", "ml-male-")):
             scene_voice = "indicf5:" + scene_voice
+        keywords_value = raw.get("keywords") or raw.get("pexels_keywords") or raw.get("search_terms") or ""
+        if isinstance(keywords_value, list):
+            keywords_value = ", ".join(str(term) for term in keywords_value)
 
         normalized.append({
             "id": str(scene_id or f"scene_{index}"),
@@ -488,7 +491,7 @@ def _validate_imported_project(data):
             "end": end,
             "urls": urls,
             "local_path": str(raw.get("local_path") or raw.get("local_video_path") or ""),
-            "keywords": str(raw.get("keywords") or raw.get("pexels_keywords") or ""),
+            "keywords": str(keywords_value),
             "visual_prompt": str(raw.get("visual_prompt") or raw.get("ai_visual_prompt") or "Describe the exact subject and visual style to match."),
             "source_start": float(raw.get("source_start", raw.get("default_source_start", 0)) or 0),
             "narration": str(raw.get("narration") or raw.get("narration_text") or ""),
