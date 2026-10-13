@@ -58,7 +58,6 @@ from app.services import (
     video,
     volcengine_seedance,
     voice,
-    voice_profiles,
     indicf5_profiles,
     webui_task,
 )
@@ -246,7 +245,6 @@ _RUNTIME_CONFIG_SECTIONS = {
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
     "fish_audio": config.fish_audio,
-    "voxcpm": config.voxcpm,
     "ui": config.ui,
 }
 # 设置预设与密钥备份使用各自的文件标识。导入时先校验 schema 和版本，
@@ -7292,167 +7290,6 @@ def _render_audio_settings(panel, params):
                     key="fish_audio_model_select",
                 )
                 _set_runtime_config("fish_audio", "model", fish_model)
-
-            # ModelBest hosts VoxCPM behind its streaming Audio Speech API.
-            # The fixed provider endpoint is still editable for compatible
-            # gateways, while the user only has to supply an API key and a
-            # speech_synthesis-capable model id for the standard platform.
-            if tts_mode_enabled and (
-                selected_tts_server == "voxcpm"
-                or (voice_name and voice.is_voxcpm_voice(voice_name))
-            ):
-                _sync_voxcpm_api_key_input()
-                voxcpm_api_key = st.text_input(
-                    tr("VoxCPM API Key"),
-                    type="password",
-                    key="voxcpm_api_key_input",
-                )
-                _set_runtime_config("voxcpm", "api_key", voxcpm_api_key)
-
-                voxcpm_model = st.text_input(
-                    tr("VoxCPM Model ID"),
-                    value=config.voxcpm.get("model_id", ""),
-                    key="voxcpm_model_id_input",
-                    placeholder=tr("VoxCPM Model ID Placeholder"),
-                )
-                _set_runtime_config("voxcpm", "model_id", voxcpm_model.strip())
-
-                voxcpm_base_url = st.text_input(
-                    tr("VoxCPM Base URL"),
-                    value=config.voxcpm.get("base_url") or DEFAULT_VOXCPM_BASE_URL,
-                    key="voxcpm_base_url_input",
-                    placeholder=DEFAULT_VOXCPM_BASE_URL,
-                )
-                _set_runtime_config(
-                    "voxcpm",
-                    "base_url",
-                    (voxcpm_base_url or DEFAULT_VOXCPM_BASE_URL).strip().rstrip("/"),
-                )
-
-                saved_voice_profiles = voice_profiles.list_profiles()
-                profile_ids = ["__upload__"] + [item["id"] for item in saved_voice_profiles]
-                selected_profile_id = st.selectbox(
-                    "Saved reference voice profile",
-                    profile_ids,
-                    format_func=lambda profile_id: (
-                        "Upload a new reference below"
-                        if profile_id == "__upload__"
-                        else next(
-                            (item["name"] for item in saved_voice_profiles if item["id"] == profile_id),
-                            profile_id,
-                        )
-                    ),
-                    key="voxcpm_saved_profile_selector",
-                    help="Create profiles in the Reference Voice Studio page, then select one here to reuse it.",
-                )
-                if selected_profile_id != "__upload__":
-                    try:
-                        previous_reference_digest = _get_voxcpm_reference_audio_digest()
-                        reference_audio = voice_profiles.load_profile_audio(selected_profile_id)
-                        reference_digest = hashlib.sha256(reference_audio).hexdigest()
-                        st.session_state[VOXCPM_REFERENCE_AUDIO_SESSION_KEY] = {
-                            "upload_digest": "saved-profile:" + selected_profile_id,
-                            "audio_digest": reference_digest,
-                            "audio_bytes": reference_audio,
-                        }
-                        if (
-                            previous_reference_digest != reference_digest
-                            and not st.session_state.get(VOXCPM_SEPARATE_PROMPT_AUDIO_SESSION_KEY, False)
-                        ):
-                            _clear_voxcpm_prompt_transcript()
-                        st.session_state.pop(VOXCPM_REFERENCE_AUDIO_ERROR_SESSION_KEY, None)
-                        uploaded_reference_audio = None
-                    except (OSError, ValueError) as exc:
-                        st.session_state.pop(VOXCPM_REFERENCE_AUDIO_SESSION_KEY, None)
-                        st.session_state[VOXCPM_REFERENCE_AUDIO_ERROR_SESSION_KEY] = str(exc)
-                        reference_audio = None
-                        uploaded_reference_audio = None
-                else:
-                    uploaded_reference_audio = st.file_uploader(
-                        tr("VoxCPM Reference Audio"),
-                        type=list(voice.VOXCPM_REFERENCE_AUDIO_FILE_TYPES),
-                        key="voxcpm_reference_audio_uploader",
-                        help=tr("VoxCPM Reference Audio Help"),
-                    )
-                    reference_audio = _sync_voxcpm_reference_audio(
-                        uploaded_reference_audio
-                    )
-                st.caption(tr("VoxCPM Reference Audio Notice"))
-                reference_audio_error = st.session_state.get(
-                    VOXCPM_REFERENCE_AUDIO_ERROR_SESSION_KEY
-                )
-                if reference_audio_error:
-                    st.error(
-                        tr("VoxCPM Reference Audio Invalid").format(
-                            error=reference_audio_error
-                        )
-                    )
-
-                if reference_audio:
-                    high_fidelity_enabled = st.toggle(
-                        tr("VoxCPM High Fidelity Delivery"),
-                        key=VOXCPM_HIGH_FIDELITY_SESSION_KEY,
-                        help=tr("VoxCPM High Fidelity Delivery Help"),
-                    )
-                    if high_fidelity_enabled:
-                        use_separate_prompt_audio = st.toggle(
-                            tr("VoxCPM Separate Prompt Audio"),
-                            key=VOXCPM_SEPARATE_PROMPT_AUDIO_SESSION_KEY,
-                            help=tr("VoxCPM Separate Prompt Audio Help"),
-                        )
-                        _sync_voxcpm_prompt_example_mode(use_separate_prompt_audio)
-                        if use_separate_prompt_audio:
-                            prompt_audio_file = st.file_uploader(
-                                tr("VoxCPM Prompt Audio"),
-                                type=list(voice.VOXCPM_REFERENCE_AUDIO_FILE_TYPES),
-                                key="voxcpm_prompt_audio_uploader",
-                                help=tr("VoxCPM Prompt Audio Help"),
-                            )
-                            _sync_voxcpm_prompt_audio(prompt_audio_file)
-                        else:
-                            _clear_voxcpm_separate_prompt_audio()
-                        effective_prompt_audio = _get_voxcpm_effective_prompt_audio()
-                        if st.button(
-                            tr("Transcribe VoxCPM Prompt Audio"),
-                            key="transcribe_voxcpm_prompt_audio_button",
-                            icon=":material/transcribe:",
-                            help=tr("Transcribe VoxCPM Prompt Audio Help"),
-                            use_container_width=True,
-                            disabled=not bool(effective_prompt_audio),
-                        ):
-                            try:
-                                with st.spinner(tr("Transcribing VoxCPM Prompt Audio")):
-                                    recognized_text = subtitle.transcribe_audio_bytes(
-                                        effective_prompt_audio
-                                    )
-                            except Exception:
-                                logger.exception(
-                                    "failed to transcribe VoxCPM prompt audio"
-                                )
-                                recognized_text = ""
-                            if recognized_text:
-                                st.session_state[VOXCPM_PROMPT_TEXT_SESSION_KEY] = (
-                                    recognized_text
-                                )
-                                st.toast(tr("VoxCPM Prompt Audio Transcribed"))
-                            else:
-                                st.error(tr("VoxCPM Prompt Audio Transcription Failed"))
-                        st.text_area(
-                            tr("VoxCPM Prompt Text"),
-                            key=VOXCPM_PROMPT_TEXT_SESSION_KEY,
-                            help=tr("VoxCPM Prompt Text Help"),
-                            height=100,
-                        )
-                        st.caption(tr("VoxCPM Prompt Transcript Review"))
-                        prompt_error = _get_voxcpm_prompt_validation_error()
-                        if prompt_error:
-                            st.error(
-                                tr("VoxCPM Prompt Invalid").format(
-                                    error=prompt_error
-                                )
-                            )
-                    else:
-                        _clear_voxcpm_prompt_state()
 
             # Chatterbox API settings section (self-hosted, OpenAI-compatible)
             if tts_mode_enabled and (
