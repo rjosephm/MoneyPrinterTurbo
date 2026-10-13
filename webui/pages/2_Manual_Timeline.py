@@ -443,40 +443,68 @@ def _validate_imported_project(data):
     settings = data.get("settings", {})
     if not isinstance(settings, dict):
         raise ValueError('"settings" must be an object.')
-    required = ("id", "start", "end")
     normalized = []
     for index, raw in enumerate(scenes, 1):
         if not isinstance(raw, dict):
             raise ValueError(f"Scene {index} must be a JSON object.")
-        missing = [key for key in required if key not in raw]
+
+        # Accept both the editor's canonical keys and descriptive keys used by
+        # exported/imported templates from earlier versions.
+        scene_id = raw.get("id", raw.get("scene_id", raw.get("Scene ID")))
+        start_value = raw.get("start", raw.get("start_time", raw.get("timeline_start", raw.get("timeline_start_seconds"))))
+        end_value = raw.get("end", raw.get("end_time", raw.get("timeline_end", raw.get("timeline_end_seconds"))))
+        missing = [
+            label for label, value in (("id", scene_id), ("start", start_value), ("end", end_value))
+            if value is None or (isinstance(value, str) and not value.strip())
+        ]
         if missing:
-            raise ValueError(f"Scene {index} is missing required field(s): {', '.join(missing)}.")
+            raise ValueError(
+                f"Scene {index} is missing required field(s): {', '.join(missing)}. "
+                "Use id, start, and end (or scene_id, start_time, and end_time)."
+            )
         try:
-            start, end = float(raw["start"]), float(raw["end"])
+            start, end = float(start_value), float(end_value)
         except (TypeError, ValueError):
             raise ValueError(f"Scene {index} start/end must be numbers.")
         if start < 0 or end <= start:
             raise ValueError(f"Scene {index} must have start >= 0 and end > start.")
-        urls = raw.get("urls", raw.get("url", ""))
+
+        urls = raw.get("urls", raw.get("url", raw.get("video_urls", raw.get("Video URLs", ""))))
         if isinstance(urls, list):
             urls = "\n".join(str(url) for url in urls)
         elif not isinstance(urls, str):
             raise ValueError(f"Scene {index} urls must be a string or array of URLs.")
+
+        scene_voice = str(raw.get("voice") or raw.get("narration_voice") or "").strip()
+        # Accept profile IDs and their UI label form, storing the internal option value.
+        if scene_voice.lower().startswith("indicf5 profile:"):
+            scene_voice = "indicf5:" + scene_voice.split(":", 1)[1].strip()
+        elif scene_voice and scene_voice.startswith("ml-female-") or scene_voice.startswith("ml-male-"):
+            scene_voice = "indicf5:" + scene_voice
+
         normalized.append({
-            "id": str(raw.get("id") or f"scene_{index}"),
+            "id": str(scene_id or f"scene_{index}"),
             "start": start,
             "end": end,
             "urls": urls,
-            "local_path": str(raw.get("local_path") or ""),
-            "keywords": str(raw.get("keywords") or ""),
-            "visual_prompt": str(raw.get("visual_prompt") or "Describe the exact subject and visual style to match."),
-            "source_start": float(raw.get("source_start") or 0),
-            "narration": str(raw.get("narration") or ""),
-            "voice": str(raw.get("voice") or ""),
+            "local_path": str(raw.get("local_path") or raw.get("local_video_path") or ""),
+            "keywords": str(raw.get("keywords") or raw.get("pexels_keywords") or ""),
+            "visual_prompt": str(raw.get("visual_prompt") or raw.get("ai_visual_prompt") or "Describe the exact subject and visual style to match."),
+            "source_start": float(raw.get("source_start", raw.get("default_source_start", 0)) or 0),
+            "narration": str(raw.get("narration") or raw.get("narration_text") or ""),
+            "voice": scene_voice,
         })
+
+    normalized_settings = dict(settings)
+    global_voice = str(normalized_settings.get("voice") or "").strip()
+    if global_voice.lower().startswith("indicf5 profile:"):
+        normalized_settings["voice"] = "indicf5:" + global_voice.split(":", 1)[1].strip()
+    elif global_voice.startswith("ml-female-") or global_voice.startswith("ml-male-"):
+        normalized_settings["voice"] = "indicf5:" + global_voice
+
     return {
         "project_id": str(data.get("project_id") or "my_video"),
-        "settings": settings,
+        "settings": normalized_settings,
         "scenes": normalized,
     }
 
