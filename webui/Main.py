@@ -245,6 +245,9 @@ _RUNTIME_CONFIG_SECTIONS = {
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
     "fish_audio": config.fish_audio,
+    # Retain legacy config serialization so existing saved settings are not
+    # silently dropped; the provider itself remains hidden from the UI.
+    "voxcpm": config.voxcpm,
     "ui": config.ui,
 }
 # 设置预设与密钥备份使用各自的文件标识。导入时先校验 schema 和版本，
@@ -1498,6 +1501,10 @@ def _infer_tts_server_from_voice(voice_name):
         return "kokoro"
     if voice.is_fish_audio_voice(voice_name):
         return "fish_audio"
+    # Keep recognizing previously saved VoxCPM voice identifiers for backward
+    # compatibility, even though VoxCPM is no longer selectable in the UI.
+    if voice.is_voxcpm_voice(voice_name):
+        return "voxcpm"
     if voice.is_indicf5_voice(voice_name):
         return "indicf5"
     if voice.is_azure_v2_voice(voice_name):
