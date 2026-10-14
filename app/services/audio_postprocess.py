@@ -37,7 +37,7 @@ def build_filter(settings):
     if abs(pitch) > 0.001:
         ratio = 2 ** (pitch / 12.0)
         filters.extend([
-            f"asetrate=48000*{ratio:.8f}",
+            f"asetrate={int(round(48000 * ratio))}",
             "aresample=48000",
             f"atempo={1.0 / ratio:.8f}",
         ])
