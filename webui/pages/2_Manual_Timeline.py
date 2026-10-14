@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import streamlit as st
 
 from app.config import config
-from app.services import voice as voice_service, indicf5_profiles
+from app.services import voice as voice_service, indicf5_profiles, audio_postprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
@@ -36,6 +36,78 @@ def _voice_option_label(value):
         )
         return f"IndicF5 profile: {profile['name']}" if profile else f"Missing IndicF5 profile: {profile_id}"
     return str(value)
+
+
+def _audio_presets():
+    return {
+        "Natural": {"clarity": 45, "target_lufs": -16, "speed": 1.0, "pitch_semitones": 0.0, "pause_ms": 250},
+        "Warm Narrator": {"clarity": 35, "target_lufs": -16, "speed": 0.97, "pitch_semitones": -0.5, "pause_ms": 350},
+        "Clear Voice": {"clarity": 75, "target_lufs": -16, "speed": 1.0, "pitch_semitones": 0.0, "pause_ms": 200},
+        "Calm": {"clarity": 40, "target_lufs": -17, "speed": 0.95, "pitch_semitones": 0.0, "pause_ms": 450},
+        "Suspense": {"clarity": 45, "target_lufs": -17, "speed": 0.92, "pitch_semitones": -0.5, "pause_ms": 650},
+    }
+
+
+def _apply_audio_preset():
+    preset = st.session_state.get("manual_audio_preset", "Natural")
+    for name, value in _audio_presets().get(preset, _audio_presets()["Natural"]).items():
+        st.session_state[f"manual_audio_{name}"] = value
+
+
+def _split_narration(text):
+    text = str(text or "").strip()
+    if not text:
+        return []
+    return [part.strip() for part in re.split(r"(?<=[.!?।])\s+", text) if part.strip()]
+
+
+def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
+    """Generate original narration segments and a separate processed WAV."""
+    narration = str(scene.get("narration") or "").strip()
+    if not narration:
+        return None, 0.0
+    selected_voice = (
+        str(scene.get("voice") or "").strip() if scene.get("voice_override") else ""
+    ) or str(settings.get("voice") or "ml-IN-MidhunNeural").strip()
+    original_dir = scene_folder / "narration_original"
+    original_dir.mkdir(parents=True, exist_ok=True)
+    sentences = _split_narration(narration)
+    segments = []
+    for index, sentence in enumerate(sentences, 1):
+        if selected_voice.startswith("indicf5:"):
+            target = original_dir / f"segment_{index:03d}.wav"
+            result = voice_service.tts(
+                text=sentence, voice_name=selected_voice,
+                voice_rate=max(0.5, 1.0 + int(settings.get("narration_speed", 0)) / 100.0),
+                voice_file=str(target), voice_volume=1.0,
+            )
+            if result is None or not target.is_file() or target.stat().st_size == 0:
+                raise RuntimeError(f"{sid}: IndicF5 did not generate narration. Check the local API and saved profile.")
+        else:
+            try:
+                import edge_tts
+            except ImportError as exc:
+                raise RuntimeError("Install edge-tts to generate narration: pip install edge-tts") from exc
+            target = original_dir / f"segment_{index:03d}.mp3"
+            rate = int(settings.get("narration_speed", 0))
+            asyncio.run(edge_tts.Communicate(sentence, selected_voice, rate=f"{rate:+d}%").save(str(target)))
+            if not target.is_file() or target.stat().st_size == 0:
+                raise RuntimeError(f"{sid}: TTS did not generate narration.")
+        segments.append(target)
+    audio_settings = dict(settings.get("audio_processing") or {})
+    original_joined = original_dir / "narration_original.wav"
+    audio_postprocess.join_audio_segments(
+        segments, original_joined, pause_ms=int(audio_settings.get("pause_ms", 250)), ffmpeg=ffmpeg
+    )
+    if audio_settings.get("enabled", True):
+        audio_path = scene_folder / "narration_processed.wav"
+        audio_postprocess.process_audio(original_joined, audio_path, audio_settings, ffmpeg=ffmpeg)
+    else:
+        audio_path = original_joined
+    duration = audio_postprocess.probe_duration(audio_path, ffprobe=ffprobe)
+    if duration <= 0:
+        raise RuntimeError(f"{sid}: generated narration has no measurable duration.")
+    return audio_path, duration
 
 
 def _configured_pexels_key():
@@ -304,21 +376,34 @@ def render(project, folder, progress_callback=None):
         raise RuntimeError("FFmpeg and FFprobe must be installed and available on PATH.")
 
     report(0, "Checking timeline and output settings…")
+    settings = project.get("settings", {})
     scenes = sorted(project["scenes"], key=lambda row: float(row["start"]))
     if not scenes:
         raise ValueError("Add at least one scene.")
+    auto_fit = bool(settings.get("auto_fit_timing", True))
+    folder.mkdir(parents=True, exist_ok=True)
     cursor = 0.0
-    for scene in scenes:
+    # Generate speech first, then use its measured duration to reflow scene timings.
+    for index, scene in enumerate(scenes, 1):
         start, end = float(scene["start"]), float(scene["end"])
-        if start < cursor - 0.001:
-            raise ValueError("Scene time slots overlap.")
-        if start > cursor + 0.001:
-            raise ValueError("Timeline has a gap; make slots contiguous starting at 0.")
         if end <= start:
             raise ValueError("Each scene end must be after its start.")
-        cursor = end
-
-    settings = project.get("settings", {})
+        sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(scene.get("id") or f"scene_{index}"))
+        scene_folder = folder / f"scene_{index:03d}_{sid}"
+        scene_folder.mkdir(parents=True, exist_ok=True)
+        report((index - 1) / len(scenes) * 8, f"Scene {index}/{len(scenes)}: generating narration…")
+        audio_path, audio_duration = _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe)
+        scene["_prepared_audio_path"] = str(audio_path) if audio_path else ""
+        if auto_fit:
+            duration = audio_duration if audio_duration > 0 else end - start
+            scene["start"], scene["end"] = round(cursor, 3), round(cursor + duration, 3)
+            cursor += duration
+        else:
+            if start < cursor - 0.001:
+                raise ValueError("Scene time slots overlap.")
+            if start > cursor + 0.001:
+                raise ValueError("Timeline has a gap; make slots contiguous starting at 0.")
+            cursor = end
     width, height = _output_size(settings)
     fps = int(settings.get("fps", 30))
     narration_rate = int(settings.get("narration_speed", 0))
@@ -385,30 +470,10 @@ def render(project, folder, progress_callback=None):
 
         report(scene_base + scene_span * 0.68, f"Scene {scene_index}/{scene_count} ({sid}): preparing narration audio…")
         narration = str(scene.get("narration") or "").strip()
-        audio_path = scene_folder / "narration.mp3"
-        if narration:
-            scene_voice = str(scene.get("voice") or "").strip()
-            selected_voice = scene_voice or str(settings.get("voice") or "ml-IN-MidhunNeural").strip()
-            if selected_voice.startswith("indicf5:"):
-                result = voice_service.tts(
-                    text=narration,
-                    voice_name=selected_voice,
-                    voice_rate=max(0.5, 1.0 + narration_rate / 100.0),
-                    voice_file=str(audio_path),
-                    voice_volume=1.0,
-                )
-                if result is None or not audio_path.is_file() or audio_path.stat().st_size == 0:
-                    raise RuntimeError(
-                        f"IndicF5 did not generate narration for {sid}. Check the local API and saved profile."
-                    )
-            else:
-                try:
-                    import edge_tts
-                except ImportError as exc:
-                    raise RuntimeError("Install edge-tts to generate narration: pip install edge-tts") from exc
-                asyncio.run(edge_tts.Communicate(narration, selected_voice, rate=tts_rate).save(str(audio_path)))
-            audio_input = str(audio_path)
-        else:
+        audio_input = str(scene.get("_prepared_audio_path") or "")
+        if narration and (not audio_input or not Path(audio_input).is_file()):
+            raise RuntimeError(f"{sid}: prepared narration audio is missing.")
+        if not narration:
             audio_input = "anullsrc=r=48000:cl=stereo"
 
         report(scene_base + scene_span * 0.82, f"Scene {scene_index}/{scene_count} ({sid}): muxing video and audio…")
@@ -457,6 +522,8 @@ def _template_project(project_id="my_video"):
             "narration_speed": 0,
             "voice": "ml-IN-MidhunNeural",
             "crop_mode": "Fill and crop",
+            "auto_fit_timing": True,
+            "audio_processing": {**_audio_presets()["Natural"], "preset": "Natural", "enabled": True, "trim_edges": True},
         },
         "scenes": [],
     }
@@ -524,6 +591,7 @@ def _validate_imported_project(data):
             "source_start": float(raw.get("source_start", raw.get("default_source_start", 0)) or 0),
             "narration": str(raw.get("narration") or raw.get("narration_text") or ""),
             "voice": scene_voice,
+            "voice_override": bool(raw.get("voice_override", False)),
         })
 
     normalized_settings = dict(settings)
@@ -614,6 +682,52 @@ def main():
                 if settings.get("crop_mode", "Fill and crop") in ["Fill and crop", "Fit with bars"] else 0,
                 key=f"manual_setting_crop_mode_{widget_version}",
             )
+    st.subheader("Global audio processing")
+    audio = settings.setdefault("audio_processing", {
+        **_audio_presets()["Natural"], "preset": "Natural", "enabled": True, "trim_edges": True
+    })
+    with st.expander("Global narrator audio settings", expanded=True):
+        audio["enabled"] = st.checkbox(
+            "Enable audio post-processing (original audio is preserved)",
+            value=bool(audio.get("enabled", True)), key=f"manual_audio_enabled_{widget_version}",
+        )
+        preset_names = list(_audio_presets())
+        audio["preset"] = st.selectbox(
+            "Audio preset", preset_names,
+            index=preset_names.index(audio.get("preset", "Natural")) if audio.get("preset", "Natural") in preset_names else 0,
+            key="manual_audio_preset", on_change=_apply_audio_preset,
+        )
+        defaults = _audio_presets().get(audio["preset"], _audio_presets()["Natural"])
+        ac1, ac2, ac3 = st.columns(3)
+        with ac1:
+            audio["clarity"] = st.slider("Clarity / presence", 0, 100,
+                int(st.session_state.get("manual_audio_clarity", audio.get("clarity", defaults["clarity"]))),
+                step=5, key="manual_audio_clarity")
+            audio["target_lufs"] = st.slider("Target loudness (LUFS)", -23, -14,
+                int(st.session_state.get("manual_audio_target_lufs", audio.get("target_lufs", defaults["target_lufs"]))),
+                key="manual_audio_target_lufs")
+        with ac2:
+            audio["speed"] = st.slider("Post-processing speed", 0.85, 1.15,
+                float(st.session_state.get("manual_audio_speed", audio.get("speed", defaults["speed"]))),
+                step=0.01, key="manual_audio_speed")
+            audio["pitch_semitones"] = st.slider("Pitch shift (semitones)", -2.0, 2.0,
+                float(st.session_state.get("manual_audio_pitch_semitones", audio.get("pitch_semitones", defaults["pitch_semitones"]))),
+                step=0.5, key="manual_audio_pitch_semitones")
+        with ac3:
+            audio["pause_ms"] = st.slider("Pause between sentences (ms)", 0, 800,
+                int(st.session_state.get("manual_audio_pause_ms", audio.get("pause_ms", defaults["pause_ms"]))),
+                step=50, key="manual_audio_pause_ms")
+            audio["trim_edges"] = st.checkbox("Trim excess start/end silence",
+                value=bool(audio.get("trim_edges", True)), key=f"manual_audio_trim_edges_{widget_version}")
+        settings["audio_processing"] = audio
+        settings["auto_fit_timing"] = st.checkbox(
+            "Auto-fit each scene to narration duration and shift later scenes",
+            value=bool(settings.get("auto_fit_timing", True)),
+            key=f"manual_auto_fit_timing_{widget_version}",
+            help="For example, a 0–15 second scene with 8 seconds of narration becomes 0–8 seconds. Following scenes move earlier. Scenes without narration retain their entered duration.",
+        )
+        st.caption("The default narrator applies to every scene unless a scene-specific override is enabled.")
+
     st.session_state.manual_project_settings = settings
 
     st.subheader("Scene JSON — import, template and export")
@@ -625,7 +739,7 @@ def main():
             {key: row.get(key, default) for key, default in {
                 "id": "", "start": 0, "end": 8, "urls": "", "local_path": "",
                 "keywords": "", "visual_prompt": "", "source_start": 0,
-                "narration": "", "voice": "",
+                "narration": "", "voice": "", "voice_override": False,
             }.items()}
             for row in st.session_state.manual_scene_rows
         ],
@@ -697,16 +811,24 @@ def main():
                 row["end"] = st.number_input("Timeline end (seconds)", min_value=0.1, value=max(0.1, float(row.get("end", 15) or 15)), step=1.0, key=f"scene_end_{widget_version}_{index}")
                 row["source_start"] = st.number_input("Default source start (seconds)", min_value=0.0, value=float(row.get("source_start", 0) or 0), step=1.0, key=f"scene_source_start_{widget_version}_{index}")
             with c:
-                current_voice = row.get("voice") or (st.session_state.manual_scene_rows[0].get("voice") if st.session_state.manual_scene_rows else "") or settings.get("voice") or "ml-IN-MidhunNeural"
-                if current_voice not in voices:
-                    voices = voices + [current_voice]
-                row["voice"] = st.selectbox(
-                    "Narration voice", voices,
-                    index=voices.index(current_voice),
-                    format_func=_voice_option_label,
-                    key=f"scene_voice_{widget_version}_{index}",
-                    help="New scenes inherit Scene 1's selected voice by default. You can override any scene individually.",
+                row["voice_override"] = st.checkbox(
+                    "Use a different narrator for this scene",
+                    value=bool(row.get("voice_override", False)),
+                    key=f"scene_voice_override_{widget_version}_{index}",
                 )
+                if row["voice_override"]:
+                    current_voice = row.get("voice") or settings.get("voice") or "ml-IN-MidhunNeural"
+                    if current_voice not in voices:
+                        voices = voices + [current_voice]
+                    row["voice"] = st.selectbox(
+                        "Scene-specific narrator", voices,
+                        index=voices.index(current_voice),
+                        format_func=_voice_option_label,
+                        key=f"scene_voice_{widget_version}_{index}",
+                        help="When unchecked, this scene uses the global default narrator.",
+                    )
+                else:
+                    row["voice"] = str(settings.get("voice") or "ml-IN-MidhunNeural")
             row["narration"] = st.text_area("Narration text", str(row.get("narration") or ""), height=130, key=f"scene_narration_{widget_version}_{index}")
             row["urls"] = st.text_area(
                 "Video URLs (one per line, in playback order)", str(row.get("urls") or ""),
