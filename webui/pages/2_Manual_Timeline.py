@@ -827,8 +827,7 @@ def main():
                         key=f"scene_voice_{widget_version}_{index}",
                         help="When unchecked, this scene uses the global default narrator.",
                     )
-                else:
-                    row["voice"] = str(settings.get("voice") or "ml-IN-MidhunNeural")
+                # Keep the last scene-specific choice so toggling override off/on is reversible.
             row["narration"] = st.text_area("Narration text", str(row.get("narration") or ""), height=130, key=f"scene_narration_{widget_version}_{index}")
             row["urls"] = st.text_area(
                 "Video URLs (one per line, in playback order)", str(row.get("urls") or ""),
