@@ -927,6 +927,12 @@ def main():
                 update_render_progress(0, "Render requested. Validating scenes…")
                 output = render(project, OUT / project_id, progress_callback=update_render_progress)
                 st.success(f"Video created successfully: {output.name}")
+                if settings.get("auto_fit_timing", True):
+                    fitted = " · ".join(
+                        f"{scene.get('id', f'Scene {i}')}: {float(scene['start']):.2f}–{float(scene['end']):.2f}s"
+                        for i, scene in enumerate(project_scenes, 1)
+                    )
+                    st.info("Auto-fitted scene timings: " + fitted)
                 st.video(str(output))
                 st.download_button("Download rendered video", output.read_bytes(), file_name=output.name, mime="video/mp4")
             except Exception as exc:
