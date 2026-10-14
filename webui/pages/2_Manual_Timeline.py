@@ -71,7 +71,11 @@ def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
     ) or str(settings.get("voice") or "ml-IN-MidhunNeural").strip()
     original_dir = scene_folder / "narration_original"
     original_dir.mkdir(parents=True, exist_ok=True)
-    sentences = _split_narration(narration)
+    sentences = (
+        [narration]
+        if selected_voice.startswith("indicf5:")
+        else _split_narration(narration)
+    )
     segments = []
     for index, sentence in enumerate(sentences, 1):
         if selected_voice.startswith("indicf5:"):
