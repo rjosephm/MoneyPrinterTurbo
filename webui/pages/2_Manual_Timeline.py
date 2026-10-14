@@ -108,7 +108,7 @@ def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
     audio_settings = dict(settings.get("audio_processing") or {})
     original_joined = original_dir / "narration_original.wav"
     audio_postprocess.join_audio_segments(
-        segments, original_joined, pause_ms=int(audio_settings.get("pause_ms", 250)), ffmpeg=ffmpeg
+        segments, original_joined, pause_ms=int(audio_settings.get("pause_ms", 250)) if audio_settings.get("enabled", True) else 0, ffmpeg=ffmpeg
     )
     legacy_rate = max(0.5, min(2.0, 1.0 + int(settings.get("narration_speed", 0)) / 100.0))
     effective_audio_settings = dict(audio_settings)
