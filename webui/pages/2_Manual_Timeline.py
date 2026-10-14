@@ -75,14 +75,25 @@ def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
     segments = []
     for index, sentence in enumerate(sentences, 1):
         if selected_voice.startswith("indicf5:"):
+            import requests
+            profile_id = selected_voice.split(":", 1)[1]
+            profile = indicf5_profiles.get_profile(profile_id)
             target = original_dir / f"segment_{index:03d}.wav"
-            result = voice_service.tts(
-                text=sentence, voice_name=selected_voice,
-                voice_rate=max(0.5, 1.0 + int(settings.get("narration_speed", 0)) / 100.0),
-                voice_file=str(target), voice_volume=1.0,
+            response = requests.post(
+                profile["api_url"].rstrip("/") + "/generate",
+                json={
+                    "text": sentence,
+                    "reference_audio": profile["reference_audio"],
+                    "reference_text": profile["reference_text"],
+                },
+                timeout=(10, 300),
             )
-            if result is None or not target.is_file() or target.stat().st_size == 0:
-                raise RuntimeError(f"{sid}: IndicF5 did not generate narration. Check the local API and saved profile.")
+            response.raise_for_status()
+            if not response.content.startswith(b"RIFF") or response.content[8:12] != b"WAVE":
+                raise RuntimeError(f"{sid}: IndicF5 API did not return a valid original WAV.")
+            target.write_bytes(response.content)
+            if not target.is_file() or target.stat().st_size < 44:
+                raise RuntimeError(f"{sid}: IndicF5 did not generate narration.")
         else:
             try:
                 import edge_tts
@@ -99,9 +110,22 @@ def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
     audio_postprocess.join_audio_segments(
         segments, original_joined, pause_ms=int(audio_settings.get("pause_ms", 250)), ffmpeg=ffmpeg
     )
-    if audio_settings.get("enabled", True):
+    legacy_rate = max(0.5, min(2.0, 1.0 + int(settings.get("narration_speed", 0)) / 100.0))
+    effective_audio_settings = dict(audio_settings)
+    if selected_voice.startswith("indicf5:"):
+        effective_audio_settings["speed"] = float(audio_settings.get("speed", 1.0)) * legacy_rate
+    if audio_settings.get("enabled", True) or (
+        selected_voice.startswith("indicf5:") and abs(legacy_rate - 1.0) > 0.001
+    ):
         audio_path = scene_folder / "narration_processed.wav"
-        audio_postprocess.process_audio(original_joined, audio_path, audio_settings, ffmpeg=ffmpeg)
+        if not audio_settings.get("enabled", True):
+            effective_audio_settings.update({
+                "clarity": 0, "pitch_semitones": 0, "trim_edges": False,
+                "target_lufs": -16, "speed": legacy_rate,
+            })
+        audio_postprocess.process_audio(
+            original_joined, audio_path, effective_audio_settings, ffmpeg=ffmpeg
+        )
     else:
         audio_path = original_joined
     duration = audio_postprocess.probe_duration(audio_path, ffprobe=ffprobe)
