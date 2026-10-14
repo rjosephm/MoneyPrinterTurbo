@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import streamlit as st
 
 from app.config import config
-from app.services import voice as voice_service, indicf5_profiles, audio_postprocess
+from app.services import indicf5_profiles, audio_postprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
@@ -430,8 +430,6 @@ def render(project, folder, progress_callback=None):
             cursor = end
     width, height = _output_size(settings)
     fps = int(settings.get("fps", 30))
-    narration_rate = int(settings.get("narration_speed", 0))
-    tts_rate = f"{narration_rate:+d}%"
     if settings.get("crop_mode", "Fill and crop") == "Fit with bars":
         video_filter = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps},setsar=1"
     else:
