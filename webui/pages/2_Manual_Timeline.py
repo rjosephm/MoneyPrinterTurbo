@@ -536,6 +536,54 @@ def render(project, folder, progress_callback=None):
     return output
 
 
+
+def _cleanup_generated_temp_files(project_folder, final_output):
+    """Delete this project's intermediates and shared cache_videos contents, preserving the final MP4."""
+    project_root = OUT.resolve()
+    project_folder = Path(project_folder).resolve()
+    final_output = Path(final_output).resolve()
+
+    # Guard against accidental deletion outside the Manual Timeline output area.
+    if project_folder == project_root or project_root not in project_folder.parents:
+        raise ValueError("Cleanup refused: project folder is outside the Manual Timeline output directory.")
+    if final_output.parent != project_folder or not final_output.is_file():
+        raise ValueError("Cleanup refused: the final video was not found directly inside this project folder.")
+
+    removed_items = 0
+    for item in project_folder.iterdir():
+        if item.resolve() == final_output:
+            continue
+        if item.is_symlink() or item.is_file():
+            item.unlink()
+        elif item.is_dir():
+            shutil.rmtree(item)
+        removed_items += 1
+
+    # MoneyPrinterTurbo's shared video cache is separate from the manual project folder.
+    # Clear cache contents only after the user explicitly confirms in the UI.
+    cache_dirs = [
+        ROOT / "storage" / "cache_videos",
+        ROOT / "cache_videos",
+    ]
+    seen = set()
+    for cache_dir in cache_dirs:
+        try:
+            cache_dir = cache_dir.resolve()
+            if cache_dir in seen or not cache_dir.is_dir():
+                continue
+            seen.add(cache_dir)
+            for item in cache_dir.iterdir():
+                if item.is_symlink() or item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+                removed_items += 1
+        except OSError as exc:
+            raise RuntimeError(f"Could not clean cache folder {cache_dir}: {exc}") from exc
+
+    return removed_items
+
+
 def _template_project(project_id="my_video"):
     return {
         "project_id": project_id,
@@ -946,6 +994,9 @@ def main():
             try:
                 update_render_progress(0, "Render requested. Validating scenes…")
                 output = render(project, OUT / project_id, progress_callback=update_render_progress)
+                st.session_state.manual_last_output = str(output)
+                st.session_state.manual_last_output_project = project_id
+                st.session_state.manual_cleanup_report = ""
                 st.success(f"Video created successfully: {output.name}")
                 if settings.get("auto_fit_timing", True):
                     fitted = " · ".join(
@@ -953,12 +1004,47 @@ def main():
                         for i, scene in enumerate(project_scenes, 1)
                     )
                     st.info("Auto-fitted scene timings: " + fitted)
-                st.video(str(output))
-                st.download_button("Download rendered video", output.read_bytes(), file_name=output.name, mime="video/mp4")
             except Exception as exc:
                 render_logs.append(f"[ERROR] {exc}")
                 log_panel.code("\n".join(render_logs[-80:]), language="text")
                 st.error(f"Render failed: {exc}")
+
+    # Keep the finished video visible after Streamlit reruns caused by other buttons.
+    last_output = Path(st.session_state.get("manual_last_output", "")).resolve() if st.session_state.get("manual_last_output") else None
+    if last_output and last_output.is_file():
+        st.divider()
+        st.subheader("Finished output and temporary-file cleanup")
+        st.video(str(last_output))
+        st.download_button(
+            "Download rendered video",
+            data=last_output.read_bytes(),
+            file_name=last_output.name,
+            mime="video/mp4",
+            key="manual_download_last_output",
+        )
+        st.warning(
+            "Cleanup deletes every other file in this project's output folder and empties "
+            "MoneyPrinterTurbo's shared cache_videos folder(s). Other cached downloads may need to be fetched again."
+        )
+        confirmed = st.checkbox(
+            "I understand: delete temporary files and clear cache_videos, keeping only this final video.",
+            key="manual_confirm_cleanup",
+        )
+        if st.button(
+            "🧹 Clean temporary files (keep final video)",
+            type="secondary",
+            use_container_width=True,
+            disabled=not confirmed,
+            key="manual_cleanup_temp_files",
+        ):
+            try:
+                count = _cleanup_generated_temp_files(last_output.parent, last_output)
+                st.session_state.manual_cleanup_report = f"Cleanup complete. Removed {count} temporary file/folder item(s); final video preserved."
+                st.success(st.session_state.manual_cleanup_report)
+            except Exception as exc:
+                st.error(f"Cleanup failed: {exc}")
+        elif st.session_state.get("manual_cleanup_report"):
+            st.success(st.session_state.manual_cleanup_report)
 
 
 if __name__ == "__main__":
