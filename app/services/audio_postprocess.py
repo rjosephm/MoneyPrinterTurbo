@@ -44,11 +44,6 @@ def build_filter(settings):
     speed = max(0.5, min(2.0, float(settings.get("speed", 1.0))))
     if abs(speed - 1.0) > 0.001:
         filters.append(f"atempo={speed:.4f}")
-    if settings.get("trim_edges", True):
-        filters.append(
-            "silenceremove=start_periods=1:start_duration=0.12:start_threshold=-45dB:"
-            "stop_periods=1:stop_duration=0.25:stop_threshold=-45dB"
-        )
     target = max(-23, min(-14, int(settings.get("target_lufs", -16))))
     filters.append(f"loudnorm=I={target}:TP=-1.0:LRA=11")
     filters.append("aresample=48000")
