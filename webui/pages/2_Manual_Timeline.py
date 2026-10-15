@@ -66,7 +66,7 @@ def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
     narration = str(scene.get("narration") or "").strip()
     if not narration:
         return None, 0.0
-    selected_voice = str(settings.get("voice") or "ml-IN-MidhunNeural").strip()
+    selected_voice = str(scene.get("voice") or settings.get("voice") or "ml-IN-MidhunNeural").strip()
     original_dir = scene_folder / "narration_original"
     original_dir.mkdir(parents=True, exist_ok=True)
     sentences = (
@@ -547,7 +547,7 @@ def _template_project(project_id="my_video"):
             "voice": "ml-IN-MidhunNeural",
             "crop_mode": "Fill and crop",
             "auto_fit_timing": True,
-            "audio_processing": {**_audio_presets()["Natural"], "preset": "Natural", "enabled": True, "trim_edges": True},
+            "audio_processing": {**_audio_presets()["Natural"], "preset": "Natural", "enabled": True},
         },
         "scenes": [],
     }
@@ -706,7 +706,7 @@ def main():
             )
     st.subheader("Global audio processing")
     audio = settings.setdefault("audio_processing", {
-        **_audio_presets()["Natural"], "preset": "Natural", "enabled": True, "trim_edges": True
+        **_audio_presets()["Natural"], "preset": "Natural", "enabled": True
     })
     with st.expander("Global narrator audio settings", expanded=True):
         audio["enabled"] = st.checkbox(
@@ -739,8 +739,6 @@ def main():
             audio["pause_ms"] = st.slider("Pause between sentences (ms)", 0, 800,
                 int(st.session_state.get("manual_audio_pause_ms", audio.get("pause_ms", defaults["pause_ms"]))),
                 step=50, key="manual_audio_pause_ms")
-            audio["trim_edges"] = st.checkbox("Trim excess start/end silence",
-                value=bool(audio.get("trim_edges", True)), key=f"manual_audio_trim_edges_{widget_version}")
         settings["audio_processing"] = audio
         settings["auto_fit_timing"] = st.checkbox(
             "Auto-fit each scene to narration duration and shift later scenes",
@@ -748,7 +746,7 @@ def main():
             key=f"manual_auto_fit_timing_{widget_version}",
             help="For example, a 0–15 second scene with 8 seconds of narration becomes 0–8 seconds. Following scenes move earlier. Scenes without narration retain their entered duration.",
         )
-        st.caption("The default narrator applies to every scene unless a scene-specific override is enabled.")
+        st.caption("The global narrator applies to every scene unless a scene-specific override is enabled.")
 
     st.session_state.manual_project_settings = settings
 
@@ -761,7 +759,8 @@ def main():
             {key: row.get(key, default) for key, default in {
                 "id": "", "start": 0, "end": 8, "urls": "", "local_path": "",
                 "keywords": "", "visual_prompt": "", "source_start": 0,
-                "narration": "",
+                "narration": "", "voice": settings.get("voice", "ml-IN-MidhunNeural"),
+                "use_voice_override": False,
             }.items()}
             for row in st.session_state.manual_scene_rows
         ],
@@ -833,6 +832,24 @@ def main():
                 row["end"] = st.number_input("Timeline end (seconds)", min_value=0.1, value=max(0.1, float(row.get("end", 15) or 15)), step=1.0, key=f"scene_end_{widget_version}_{index}")
                 row["source_start"] = st.number_input("Default source start (seconds)", min_value=0.0, value=float(row.get("source_start", 0) or 0), step=1.0, key=f"scene_source_start_{widget_version}_{index}")
             row["narration"] = st.text_area("Narration text", str(row.get("narration") or ""), height=130, key=f"scene_narration_{widget_version}_{index}")
+            row["use_voice_override"] = st.checkbox(
+                "Use a different narrator for this scene",
+                value=bool(row.get("use_voice_override", False)),
+                key=f"scene_voice_override_enabled_{widget_version}_{index}",
+            )
+            if row["use_voice_override"]:
+                voices = _available_voice_options()
+                current_voice = str(row.get("voice") or settings.get("voice") or "ml-IN-MidhunNeural")
+                if current_voice not in voices:
+                    current_voice = str(settings.get("voice") or "ml-IN-MidhunNeural")
+                row["voice"] = st.selectbox(
+                    "Scene-specific narrator", voices,
+                    index=voices.index(current_voice) if current_voice in voices else 0,
+                    format_func=_voice_option_label,
+                    key=f"scene_voice_override_{widget_version}_{index}",
+                )
+            else:
+                row["voice"] = str(settings.get("voice") or "ml-IN-MidhunNeural")
             row["urls"] = st.text_area(
                 "Video URLs (one per line, in playback order)", str(row.get("urls") or ""),
                 height=140, key=f"scene_urls_{widget_version}_{index}",
