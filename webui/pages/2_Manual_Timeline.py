@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import streamlit as st
 
 from app.config import config
-from app.services import indicf5_profiles, audio_postprocess, bgm as bgm_service, sonilo as sonilo_music_service, elevenlabs_music as elevenlabs_music_service
+from app.services import indicf5_profiles, audio_postprocess, bgm as bgm_service
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
@@ -555,6 +555,9 @@ def render(project, folder, progress_callback=None):
     # Use uploaded music first; otherwise follow the same source choices as automatic generation.
     music_path = Path(str(settings.get("background_music_path") or "")) if settings.get("background_music_path") else None
     music_source = str(settings.get("background_music_source", "Random available music"))
+    if music_source not in ("Random available music", "Preset song", "No background music"):
+        # Older saved JSON projects may still contain a removed AI music source.
+        music_source = "Random available music"
     total_duration = max(float(scene["end"]) for scene in scenes)
     if settings.get("background_music_enabled"):
         if music_path and music_path.is_file():
@@ -570,20 +573,6 @@ def render(project, folder, progress_callback=None):
                 music_path = Path(bgm_service.resolve_builtin_bgm_file(selected_name))
             except ValueError as exc:
                 raise RuntimeError(f"Selected preset background music is unavailable: {exc}") from exc
-        elif music_source == "Sonilo AI music":
-            report(94, "Generating Sonilo background music…")
-            music_path = folder / "generated_background_music.mp3"
-            sonilo_music_service.generate_bgm(
-                str(output), str(music_path), total_duration,
-                str(settings.get("background_music_prompt") or ""),
-            )
-        elif music_source == "ElevenLabs AI music":
-            report(94, "Generating ElevenLabs background music…")
-            music_path = folder / "generated_background_music.mp3"
-            elevenlabs_music_service.generate_bgm(
-                str(output), str(music_path), total_duration,
-                str(settings.get("background_music_prompt") or ""),
-            )
         if music_path and music_path.is_file():
             report(97, "Mixing background music with narration…")
             music_volume = max(0, min(100, int(settings.get("background_music_volume", 15)))) / 100.0
@@ -895,15 +884,15 @@ def main():
         )
         settings["background_music_source"] = st.selectbox(
             "Automatic music source when no file is uploaded",
-            ["Random available music", "Preset song", "Sonilo AI music", "ElevenLabs AI music"],
-            index=["Random available music", "Preset song", "Sonilo AI music", "ElevenLabs AI music"].index(
+            ["Random available music", "Preset song"],
+            index=["Random available music", "Preset song"].index(
                 settings.get("background_music_source", "Random available music")
                 if settings.get("background_music_source", "Random available music") in
-                ["Random available music", "Preset song", "Sonilo AI music", "ElevenLabs AI music"]
+                ["Random available music", "Preset song"]
                 else "Random available music"
             ),
             key=f"manual_music_source_{widget_version}",
-            help="Random and preset use local music. Sonilo and ElevenLabs generate a soundtrack from the assembled video and require their configured API access.",
+            help="Choose a local random track or a built-in preset. An uploaded track takes priority.",
         )
         music_upload = st.file_uploader(
             "Optional custom background music (overrides the source above)",
@@ -938,13 +927,6 @@ def main():
                 st.audio(Path(preset_paths[preset_names.index(settings["background_music_preset"])]).read_bytes())
             else:
                 st.warning("No built-in songs were found in resource/songs. Upload a track or choose random music if available.")
-        if settings["background_music_source"] in ("Sonilo AI music", "ElevenLabs AI music"):
-            settings["background_music_prompt"] = st.text_input(
-                "AI music prompt (optional)",
-                value=str(settings.get("background_music_prompt", "")),
-                key=f"manual_music_prompt_{widget_version}",
-                help="Describe the mood or style. The selected provider generates music matched to the assembled video.",
-            )
         mix1, mix2 = st.columns(2)
         with mix1:
             settings["background_music_volume"] = st.slider(
