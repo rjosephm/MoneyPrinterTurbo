@@ -551,6 +551,40 @@ def render(project, folder, progress_callback=None):
         "-f", "concat", "-safe", "0", "-i", str(concat),
         "-c", "copy", "-movflags", "+faststart", str(output),
     ])
+
+    # Optional final-stage mix keeps scene narration intact and adds a looped soundtrack underneath.
+    music_path = Path(str(settings.get("background_music_path") or "")) if settings.get("background_music_path") else None
+    if settings.get("background_music_enabled") and music_path and music_path.is_file():
+        report(97, "Mixing background music with narration…")
+        total_duration = max(float(scene["end"]) for scene in scenes)
+        music_volume = max(0, min(100, int(settings.get("background_music_volume", 15)))) / 100.0
+        narration_volume = max(50, min(150, int(settings.get("narration_volume", 100)))) / 100.0
+        fade = max(0.0, min(5.0, float(settings.get("background_music_fade_seconds", 1.5))))
+        filters = [
+            f"[0:a]volume={narration_volume:.3f}[voice]",
+            f"[1:a]volume={music_volume:.3f}"
+        ]
+        if fade > 0:
+            fade_out_start = max(0.0, total_duration - fade)
+            filters[-1] += f",afade=t=in:st=0:d={fade:.3f},afade=t=out:st={fade_out_start:.3f}:d={fade:.3f}"
+        filters[-1] += "[music]"
+        filters.append("[voice][music]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mix]")
+        mixed_output = output.with_name(output.stem + "_mixed.mp4")
+        _run([
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", str(output), "-stream_loop", "-1", "-i", str(music_path),
+            "-filter_complex", ";".join(filters),
+            "-map", "0:v:0", "-map", "[mix]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-ar", "48000", "-ac", "2", "-t", f"{total_duration:.6f}",
+            "-movflags", "+faststart", str(mixed_output),
+        ])
+        if not mixed_output.is_file() or mixed_output.stat().st_size == 0:
+            raise RuntimeError("Background music mix did not produce a valid output file.")
+        os.replace(mixed_output, output)
+    elif settings.get("background_music_enabled"):
+        raise RuntimeError("Background music is enabled, but the selected music file is missing. Upload it again or disable music mixing.")
+
     report(99, "Final video assembled. Finishing output file…")
     report(100, f"Render complete: {output}")
     return output
@@ -616,6 +650,11 @@ def _template_project(project_id="my_video"):
             "crop_mode": "Fill and crop",
             "auto_fit_timing": True,
             "audio_processing": {**_audio_presets()["Natural"], "preset": "Natural", "enabled": True},
+            "background_music_enabled": False,
+            "background_music_path": "",
+            "background_music_volume": 15,
+            "narration_volume": 100,
+            "background_music_fade_seconds": 1.5,
         },
         "scenes": [],
     }
@@ -810,7 +849,58 @@ def main():
                 int(st.session_state.get("manual_audio_pause_ms", audio.get("pause_ms", defaults["pause_ms"]))),
                 step=50, key="manual_audio_pause_ms")
         settings["audio_processing"] = audio
-        settings["auto_fit_timing"] = st.checkbox(
+
+    st.subheader("Background music and audio mixing")
+    with st.expander("Soundtrack, volume and fades", expanded=False):
+        settings["background_music_enabled"] = st.checkbox(
+            "Mix background music into the final video",
+            value=bool(settings.get("background_music_enabled", False)),
+            key=f"manual_music_enabled_{widget_version}",
+            help="Music is mixed under the narration after all scenes are assembled. Leave disabled to keep the current audio unchanged.",
+        )
+        music_upload = st.file_uploader(
+            "Background music file (MP3, WAV, M4A, AAC, or FLAC)",
+            type=["mp3", "wav", "m4a", "aac", "flac"],
+            key=f"manual_background_music_upload_{widget_version}",
+            help="Use music you have permission to publish. The file is saved inside this project's temporary folder and removed by the manual cleanup button.",
+        )
+        music_project_folder = OUT / (re.sub(r"[^A-Za-z0-9_-]", "_", st.session_state.manual_project_id or "my_video") or "my_video")
+        if music_upload is not None:
+            music_project_folder.mkdir(parents=True, exist_ok=True)
+            suffix = Path(music_upload.name).suffix.lower() or ".audio"
+            saved_music = music_project_folder / f"background_music{suffix}"
+            if not saved_music.is_file() or saved_music.read_bytes() != music_upload.getvalue():
+                saved_music.write_bytes(music_upload.getvalue())
+            settings["background_music_path"] = str(saved_music)
+            st.success(f"Background music loaded: {music_upload.name}")
+        existing_music = Path(str(settings.get("background_music_path") or "")) if settings.get("background_music_path") else None
+        if existing_music and existing_music.is_file():
+            st.caption(f"Selected soundtrack: {existing_music.name}")
+        elif settings.get("background_music_path"):
+            st.warning("The previously selected music file is missing. Upload it again.")
+        if settings["background_music_enabled"] and not (existing_music and existing_music.is_file()) and music_upload is None:
+            st.warning("Upload a music file to enable background music mixing.")
+        mix1, mix2 = st.columns(2)
+        with mix1:
+            settings["background_music_volume"] = st.slider(
+                "Background music volume (%)", 0, 100,
+                int(settings.get("background_music_volume", 15)), step=5,
+                key=f"manual_music_volume_{widget_version}",
+                help="A starting point of 10–20% usually keeps music below narration.",
+            )
+        with mix2:
+            settings["narration_volume"] = st.slider(
+                "Narration volume (%)", 50, 150,
+                int(settings.get("narration_volume", 100)), step=5,
+                key=f"manual_narration_volume_{widget_version}",
+            )
+        settings["background_music_fade_seconds"] = st.slider(
+            "Music fade-in / fade-out (seconds)", 0.0, 5.0,
+            float(settings.get("background_music_fade_seconds", 1.5)), step=0.5,
+            key=f"manual_music_fade_{widget_version}",
+        )
+
+    settings["auto_fit_timing"] = st.checkbox(
             "Auto-fit each scene to narration duration and shift later scenes",
             value=bool(settings.get("auto_fit_timing", True)),
             key=f"manual_auto_fit_timing_{widget_version}",
