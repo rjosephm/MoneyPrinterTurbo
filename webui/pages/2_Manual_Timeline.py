@@ -88,7 +88,7 @@ def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
                     "reference_audio": profile["reference_audio"],
                     "reference_text": profile["reference_text"],
                 },
-                timeout=(10, 300),
+                timeout=(10, 900),
             )
             response.raise_for_status()
             if not response.content.startswith(b"RIFF") or response.content[8:12] != b"WAVE":
@@ -215,19 +215,36 @@ def _download_video_url(url, target, sid):
     return target
 
 
-def _resolve_sources(scene, folder, sid):
+def _resolve_sources(scene, folder, sid, warnings=None):
     urls = _split_urls(scene.get("urls") or scene.get("url"))
     local = str(scene.get("local_path") or "").strip()
     keywords = str(scene.get("keywords") or "").strip()
 
-    # Explicit URLs take priority. Every supplied URL must work; never silently substitute.
+    # Explicit URLs take priority. Skip invalid links but keep usable clips.
     if urls:
         sources = []
+        failures = []
         for index, url in enumerate(urls, 1):
-            sources.append(_download_video_url(
-                url, folder / "media" / f"{sid}_source_{index:02d}.mp4", sid
-            ))
-        return sources
+            target = folder / "media" / f"{sid}_source_{index:02d}.mp4"
+            try:
+                sources.append(_download_video_url(url, target, sid))
+            except Exception as exc:
+                try:
+                    if target.exists():
+                        target.unlink()
+                except OSError:
+                    pass
+                message = f"{sid}: skipped invalid video URL ({url}): {exc}"
+                failures.append(message)
+                if warnings is not None:
+                    warnings.append(message)
+        if sources:
+            return sources
+        details = "\\n".join(failures[:3])
+        remaining = len(failures) - min(3, len(failures))
+        if remaining:
+            details += f"\\n…and {remaining} more failed URL(s)."
+        raise ValueError(f"{sid}: none of the supplied video URLs could be downloaded.\\n{details}")
 
     if local:
         source = Path(local).expanduser().resolve()
@@ -446,7 +463,10 @@ def render(project, folder, progress_callback=None):
         report(scene_base, f"Scene {scene_index}/{scene_count} ({sid}): finding and preparing video sources…")
         scene_folder = folder / f"scene_{scene_index:03d}_{sid}"
         scene_folder.mkdir(parents=True, exist_ok=True)
-        sources = _resolve_sources(scene, scene_folder, sid)
+        source_warnings = []
+        sources = _resolve_sources(scene, scene_folder, sid, warnings=source_warnings)
+        for warning in source_warnings:
+            report(scene_base, f"Warning: {warning}")
         report(scene_base + scene_span * 0.08, f"Scene {scene_index}/{scene_count} ({sid}): {len(sources)} source clip(s) ready.")
         start, end = float(scene["start"]), float(scene["end"])
         duration = end - start
@@ -697,6 +717,8 @@ def main():
         st.session_state.manual_ai_results = {}
     if "manual_ai_starts" not in st.session_state:
         st.session_state.manual_ai_starts = {}
+    if "manual_scene_audio_previews" not in st.session_state:
+        st.session_state.manual_scene_audio_previews = {}
 
     widget_version = int(st.session_state.get("manual_widget_version", 0))
     with st.sidebar:
@@ -861,6 +883,12 @@ def main():
         st.session_state.manual_scene_rows = rows
         st.rerun()
 
+    st.checkbox(
+        "Listen before rendering",
+        value=False,
+        key="manual_listen_before_rendering",
+        help="Optional: generate narration for individual scenes, listen to it, check its duration, and download the WAV before rendering. Disabled by default.",
+    )
     voices = _available_voice_options()
     for index, row in enumerate(st.session_state.manual_scene_rows):
         sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(row.get("id") or f"scene_{index + 1}"))
@@ -898,6 +926,45 @@ def main():
                 )
             else:
                 row["voice"] = str(settings.get("voice") or "ml-IN-MidhunNeural")
+
+            if st.session_state.get("manual_listen_before_rendering", False):
+                preview_key = f"{index}:{sid}"
+                if st.button(
+                    "Generate narration audio for this scene",
+                    key=f"generate_scene_audio_{widget_version}_{index}",
+                    use_container_width=True,
+                    disabled=not str(row.get("narration") or "").strip(),
+                ):
+                    try:
+                        ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+                        if not ffmpeg or not ffprobe:
+                            raise RuntimeError("FFmpeg and FFprobe must be installed and available on PATH.")
+                        project_folder = OUT / (re.sub(r"[^A-Za-z0-9_-]", "_", st.session_state.manual_project_id or "my_video") or "my_video")
+                        scene_folder = project_folder / f"scene_{index + 1:03d}_{sid}"
+                        scene_folder.mkdir(parents=True, exist_ok=True)
+                        audio_path, audio_duration = _prepare_scene_audio(
+                            row, settings, scene_folder, sid, ffmpeg, ffprobe
+                        )
+                        if not audio_path or not Path(audio_path).is_file():
+                            raise RuntimeError("Narration generation did not produce an audio file.")
+                        st.session_state.manual_scene_audio_previews[preview_key] = {
+                            "path": str(audio_path), "duration": float(audio_duration or 0)
+                        }
+                    except Exception as exc:
+                        st.error(f"Could not generate scene narration: {exc}")
+                preview = st.session_state.manual_scene_audio_previews.get(preview_key, {})
+                preview_path = Path(preview.get("path", "")) if preview.get("path") else None
+                if preview_path and preview_path.is_file():
+                    st.audio(str(preview_path))
+                    st.caption(f"Generated narration duration: {preview.get('duration', 0):.2f} seconds")
+                    st.download_button(
+                        "Download scene narration WAV",
+                        data=preview_path.read_bytes(),
+                        file_name=f"{sid}_narration.wav",
+                        mime="audio/wav",
+                        key=f"download_scene_audio_{widget_version}_{index}",
+                    )
+
             row["urls"] = st.text_area(
                 "Video URLs (one per line, in playback order)", str(row.get("urls") or ""),
                 height=140, key=f"scene_urls_{widget_version}_{index}",
@@ -934,7 +1001,10 @@ def main():
             for scene_index, row in enumerate(rows, 1):
                 sid = re.sub(r"[^A-Za-z0-9_-]", "_", str(row.get("id") or f"scene_{scene_index}"))
                 scene_folder = OUT / (st.session_state.manual_project_id or "my_video") / f"scene_{scene_index:03d}_{sid}"
-                sources = _resolve_sources(row, scene_folder, sid)
+                source_warnings = []
+                sources = _resolve_sources(row, scene_folder, sid, warnings=source_warnings)
+                for warning in source_warnings:
+                    st.warning(warning)
                 scene_duration = float(row["end"]) - float(row["start"])
                 if scene_duration <= 0:
                     raise ValueError(f"{sid}: end time must be greater than start time.")
