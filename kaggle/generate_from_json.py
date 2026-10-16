@@ -45,10 +45,15 @@ def configure_indicf5_profiles(project):
         profile_id = voice.split(":", 1)[1].strip()
         if not profile_id or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for c in profile_id.lower()):
             raise ValueError(f"Invalid IndicF5 profile id in voice field: {voice}")
+        profile_path = profile_dir / f"{profile_id}.json"
+        # Keep the actual per-speaker profile generated from the repository mapping CSV.
+        # Only create a fallback profile when a JSON uses an unknown profile ID.
+        if profile_path.is_file():
+            continue
         data = {"id": profile_id, "name": "Kaggle IndicF5",
                 "reference_audio": str(Path(reference_audio).resolve()),
                 "reference_text": reference_text, "api_url": api_url}
-        (profile_dir / f"{profile_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        profile_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main():
