@@ -948,11 +948,11 @@ def main():
         )
 
     settings["auto_fit_timing"] = st.checkbox(
-            "Auto-fit each scene to narration duration and shift later scenes",
-            value=bool(settings.get("auto_fit_timing", True)),
-            key=f"manual_auto_fit_timing_{widget_version}",
-            help="For example, a 0–15 second scene with 8 seconds of narration becomes 0–8 seconds. Following scenes move earlier. Scenes without narration retain their entered duration.",
-        )
+        "Auto-fit each scene to narration duration and shift later scenes",
+        value=bool(settings.get("auto_fit_timing", True)),
+        key=f"manual_auto_fit_timing_{widget_version}",
+        help="For example, a 0–15 second scene with 8 seconds of narration becomes 0–8 seconds. Following scenes move earlier. Scenes without narration retain their entered duration.",
+    )
     st.caption("The global narrator applies to every scene unless a scene-specific override is enabled.")
 
     st.session_state.manual_project_settings = settings
