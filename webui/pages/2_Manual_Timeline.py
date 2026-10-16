@@ -572,14 +572,14 @@ def render(project, folder, progress_callback=None):
                 raise RuntimeError(f"Selected preset background music is unavailable: {exc}") from exc
         elif music_source == "Sonilo AI music":
             report(94, "Generating Sonilo background music…")
-            music_path = music_project_folder / "generated_background_music.mp3"
+            music_path = folder / "generated_background_music.mp3"
             sonilo_music_service.generate_bgm(
                 str(output), str(music_path), total_duration,
                 str(settings.get("background_music_prompt") or ""),
             )
         elif music_source == "ElevenLabs AI music":
             report(94, "Generating ElevenLabs background music…")
-            music_path = music_project_folder / "generated_background_music.mp3"
+            music_path = folder / "generated_background_music.mp3"
             elevenlabs_music_service.generate_bgm(
                 str(output), str(music_path), total_duration,
                 str(settings.get("background_music_prompt") or ""),
