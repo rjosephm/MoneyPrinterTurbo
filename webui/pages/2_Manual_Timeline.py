@@ -88,7 +88,9 @@ def _prepare_scene_audio(scene, settings, scene_folder, sid, ffmpeg, ffprobe):
                     "reference_audio": profile["reference_audio"],
                     "reference_text": profile["reference_text"],
                 },
-                timeout=(10, 300),
+                # IndicF5 can take several minutes per long narration on a 4 GB GPU.
+                # Allow up to 15 minutes for inference while keeping connection timeout short.
+                timeout=(10, 900),
             )
             response.raise_for_status()
             if not response.content.startswith(b"RIFF") or response.content[8:12] != b"WAVE":
