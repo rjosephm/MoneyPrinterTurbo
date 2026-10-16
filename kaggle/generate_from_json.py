@@ -60,9 +60,17 @@ def main():
     json_path = Path(args.json_file).expanduser().resolve()
     if not json_path.is_file():
         parser.error(f"JSON file not found: {json_path}")
-    project = json.loads(json_path.read_text(encoding="utf-8"))
+    raw_project = json.loads(json_path.read_text(encoding="utf-8"))
     ns = load_render_namespace()
-    project = ns["_validate_imported_project"](project)
+    project = ns["_validate_imported_project"](raw_project)
+    # The current UI validator normalizes scene fields but omits the per-scene voice key.
+    # Restore it here so JSON-defined IndicF5 profile overrides survive CLI validation.
+    raw_scenes = raw_project.get("scenes", []) if isinstance(raw_project, dict) else []
+    for normalized_scene, raw_scene in zip(project.get("scenes", []), raw_scenes):
+        if isinstance(raw_scene, dict):
+            scene_voice = raw_scene.get("voice") or raw_scene.get("narration_voice")
+            if scene_voice:
+                normalized_scene["voice"] = str(scene_voice).strip()
     configure_indicf5_profiles(project)
     project_id = "".join(c if c.isalnum() or c in "_-" else "_" for c in str(project.get("project_id") or "my_video"))
     folder = Path(args.output_dir).expanduser().resolve() if args.output_dir else OUT / project_id
