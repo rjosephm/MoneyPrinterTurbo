@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import streamlit as st
 
 from app.config import config
-from app.services import indicf5_profiles, audio_postprocess
+from app.services import indicf5_profiles, audio_postprocess, bgm as bgm_service, sonilo as sonilo_music_service, elevenlabs_music as elevenlabs_music_service
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "storage" / "manual_timeline"
@@ -552,38 +552,70 @@ def render(project, folder, progress_callback=None):
         "-c", "copy", "-movflags", "+faststart", str(output),
     ])
 
-    # Optional final-stage mix keeps scene narration intact and adds a looped soundtrack underneath.
+    # Use uploaded music first; otherwise follow the same source choices as automatic generation.
     music_path = Path(str(settings.get("background_music_path") or "")) if settings.get("background_music_path") else None
-    if settings.get("background_music_enabled") and music_path and music_path.is_file():
-        report(97, "Mixing background music with narration…")
-        total_duration = max(float(scene["end"]) for scene in scenes)
-        music_volume = max(0, min(100, int(settings.get("background_music_volume", 15)))) / 100.0
-        narration_volume = max(50, min(150, int(settings.get("narration_volume", 100)))) / 100.0
-        fade = max(0.0, min(5.0, float(settings.get("background_music_fade_seconds", 1.5))))
-        filters = [
-            f"[0:a]volume={narration_volume:.3f}[voice]",
-            f"[1:a]volume={music_volume:.3f}"
-        ]
-        if fade > 0:
-            fade_out_start = max(0.0, total_duration - fade)
-            filters[-1] += f",afade=t=in:st=0:d={fade:.3f},afade=t=out:st={fade_out_start:.3f}:d={fade:.3f}"
-        filters[-1] += "[music]"
-        filters.append("[voice][music]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mix]")
-        mixed_output = output.with_name(output.stem + "_mixed.mp4")
-        _run([
-            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-            "-i", str(output), "-stream_loop", "-1", "-i", str(music_path),
-            "-filter_complex", ";".join(filters),
-            "-map", "0:v:0", "-map", "[mix]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            "-ar", "48000", "-ac", "2", "-t", f"{total_duration:.6f}",
-            "-movflags", "+faststart", str(mixed_output),
-        ])
-        if not mixed_output.is_file() or mixed_output.stat().st_size == 0:
-            raise RuntimeError("Background music mix did not produce a valid output file.")
-        os.replace(mixed_output, output)
-    elif settings.get("background_music_enabled"):
-        raise RuntimeError("Background music is enabled, but the selected music file is missing. Upload it again or disable music mixing.")
+    music_source = str(settings.get("background_music_source", "Random available music"))
+    total_duration = max(float(scene["end"]) for scene in scenes)
+    if settings.get("background_music_enabled"):
+        if music_path and music_path.is_file():
+            pass  # A user-uploaded track always takes priority over automatic selection.
+        elif music_source == "Random available music":
+            available_music = bgm_service.list_bgm_files()
+            music_path = Path(__import__("random").choice(available_music)) if available_music else None
+            if music_path is None:
+                report(96, "No background music files found; continuing without music…")
+        elif music_source == "Preset song":
+            selected_name = str(settings.get("background_music_preset") or "")
+            try:
+                music_path = Path(bgm_service.resolve_builtin_bgm_file(selected_name))
+            except ValueError as exc:
+                raise RuntimeError(f"Selected preset background music is unavailable: {exc}") from exc
+        elif music_source == "Sonilo AI music":
+            report(94, "Generating Sonilo background music…")
+            music_path = music_project_folder / "generated_background_music.mp3"
+            sonilo_music_service.generate_bgm(
+                str(output), str(music_path), total_duration,
+                str(settings.get("background_music_prompt") or ""),
+            )
+        elif music_source == "ElevenLabs AI music":
+            report(94, "Generating ElevenLabs background music…")
+            music_path = music_project_folder / "generated_background_music.mp3"
+            elevenlabs_music_service.generate_bgm(
+                str(output), str(music_path), total_duration,
+                str(settings.get("background_music_prompt") or ""),
+            )
+        if music_path and music_path.is_file():
+            report(97, "Mixing background music with narration…")
+            music_volume = max(0, min(100, int(settings.get("background_music_volume", 15)))) / 100.0
+            narration_volume = max(50, min(150, int(settings.get("narration_volume", 100)))) / 100.0
+            fade = max(0.0, min(5.0, float(settings.get("background_music_fade_seconds", 1.5))))
+            filters = [
+                f"[0:a]volume={narration_volume:.3f}[voice]",
+                f"[1:a]volume={music_volume:.3f}"
+            ]
+            if fade > 0:
+                fade_out_start = max(0.0, total_duration - fade)
+                filters[-1] += f",afade=t=in:st=0:d={fade:.3f},afade=t=out:st={fade_out_start:.3f}:d={fade:.3f}"
+            filters[-1] += "[music]"
+            filters.append("[voice][music]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mix]")
+            mixed_output = output.with_name(output.stem + "_mixed.mp4")
+            _run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                "-i", str(output), "-stream_loop", "-1", "-i", str(music_path),
+                "-filter_complex", ";".join(filters),
+                "-map", "0:v:0", "-map", "[mix]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-ar", "48000", "-ac", "2", "-t", f"{total_duration:.6f}",
+                "-movflags", "+faststart", str(mixed_output),
+            ])
+            if not mixed_output.is_file() or mixed_output.stat().st_size == 0:
+                raise RuntimeError("Background music mix did not produce a valid output file.")
+            os.replace(mixed_output, output)
+        elif music_source != "No background music":
+            # A missing random library should not break rendering; other explicit sources should.
+            if music_source != "Random available music":
+                raise RuntimeError("Background music is enabled, but the selected music source produced no file.")
+    
 
     report(99, "Final video assembled. Finishing output file…")
     report(100, f"Render complete: {output}")
@@ -650,8 +682,11 @@ def _template_project(project_id="my_video"):
             "crop_mode": "Fill and crop",
             "auto_fit_timing": True,
             "audio_processing": {**_audio_presets()["Natural"], "preset": "Natural", "enabled": True},
-            "background_music_enabled": False,
+            "background_music_enabled": True,
             "background_music_path": "",
+            "background_music_source": "Random available music",
+            "background_music_preset": "",
+            "background_music_prompt": "",
             "background_music_volume": 15,
             "narration_volume": 100,
             "background_music_fade_seconds": 1.5,
@@ -853,33 +888,63 @@ def main():
     st.subheader("Background music and audio mixing")
     with st.expander("Soundtrack, volume and fades", expanded=False):
         settings["background_music_enabled"] = st.checkbox(
-            "Mix background music into the final video",
-            value=bool(settings.get("background_music_enabled", False)),
+            "Add background music to the final video",
+            value=bool(settings.get("background_music_enabled", True)),
             key=f"manual_music_enabled_{widget_version}",
-            help="Music is mixed under the narration after all scenes are assembled. Leave disabled to keep the current audio unchanged.",
+            help="If you upload a track, it takes priority. Otherwise the selected automatic music source is used.",
+        )
+        settings["background_music_source"] = st.selectbox(
+            "Automatic music source when no file is uploaded",
+            ["Random available music", "Preset song", "Sonilo AI music", "ElevenLabs AI music"],
+            index=["Random available music", "Preset song", "Sonilo AI music", "ElevenLabs AI music"].index(
+                settings.get("background_music_source", "Random available music")
+                if settings.get("background_music_source", "Random available music") in
+                ["Random available music", "Preset song", "Sonilo AI music", "ElevenLabs AI music"]
+                else "Random available music"
+            ),
+            key=f"manual_music_source_{widget_version}",
+            help="Random and preset use local music. Sonilo and ElevenLabs generate a soundtrack from the assembled video and require their configured API access.",
         )
         music_upload = st.file_uploader(
-            "Background music file (MP3, WAV, M4A, AAC, or FLAC)",
-            type=["mp3", "wav", "m4a", "aac", "flac"],
+            "Optional custom background music (overrides the source above)",
+            type=[extension.removeprefix(".") for extension in bgm_service.SUPPORTED_BGM_EXTENSIONS],
             key=f"manual_background_music_upload_{widget_version}",
-            help="Use music you have permission to publish. The file is saved inside this project's temporary folder and removed by the manual cleanup button.",
+            help="Use music you have permission to publish. Uploaded music is saved in this project's temporary folder and removed by the manual cleanup button.",
         )
         music_project_folder = OUT / (re.sub(r"[^A-Za-z0-9_-]", "_", st.session_state.manual_project_id or "my_video") or "my_video")
         if music_upload is not None:
             music_project_folder.mkdir(parents=True, exist_ok=True)
-            suffix = Path(music_upload.name).suffix.lower() or ".audio"
+            suffix = Path(music_upload.name).suffix.lower() or ".mp3"
             saved_music = music_project_folder / f"background_music{suffix}"
             if not saved_music.is_file() or saved_music.read_bytes() != music_upload.getvalue():
                 saved_music.write_bytes(music_upload.getvalue())
             settings["background_music_path"] = str(saved_music)
-            st.success(f"Background music loaded: {music_upload.name}")
+            st.success(f"Custom background music loaded: {music_upload.name}")
         existing_music = Path(str(settings.get("background_music_path") or "")) if settings.get("background_music_path") else None
         if existing_music and existing_music.is_file():
-            st.caption(f"Selected soundtrack: {existing_music.name}")
+            st.caption(f"Uploaded soundtrack takes priority: {existing_music.name}")
         elif settings.get("background_music_path"):
-            st.warning("The previously selected music file is missing. Upload it again.")
-        if settings["background_music_enabled"] and not (existing_music and existing_music.is_file()) and music_upload is None:
-            st.warning("Upload a music file to enable background music mixing.")
+            st.warning("The previously selected upload is missing; upload it again or choose an automatic source.")
+        if settings["background_music_source"] == "Preset song":
+            preset_paths = bgm_service.list_builtin_bgm_files()
+            preset_names = [Path(p).name for p in preset_paths]
+            if preset_names:
+                saved_preset = settings.get("background_music_preset", "")
+                default_preset = saved_preset if saved_preset in preset_names else preset_names[0]
+                settings["background_music_preset"] = st.selectbox(
+                    "Choose a built-in song", preset_names, index=preset_names.index(default_preset),
+                    key=f"manual_music_preset_{widget_version}",
+                )
+                st.audio(Path(preset_paths[preset_names.index(settings["background_music_preset"])]).read_bytes())
+            else:
+                st.warning("No built-in songs were found in resource/songs. Upload a track or choose random music if available.")
+        if settings["background_music_source"] in ("Sonilo AI music", "ElevenLabs AI music"):
+            settings["background_music_prompt"] = st.text_input(
+                "AI music prompt (optional)",
+                value=str(settings.get("background_music_prompt", "")),
+                key=f"manual_music_prompt_{widget_version}",
+                help="Describe the mood or style. The selected provider generates music matched to the assembled video.",
+            )
         mix1, mix2 = st.columns(2)
         with mix1:
             settings["background_music_volume"] = st.slider(
